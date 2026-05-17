@@ -1,0 +1,17 @@
+set -tmpdir "xst/tmp"
+set -xsthdpdir "xst"
+run
+-ifn top.prj
+-ofn top.ngc
+-ifmt mixed
+-ofmt NGC
+-p xc3s500e-fg320-4
+-top top
+-opt_mode Speed
+-opt_level 1
+-iuc NO
+-keep_hierarchy No
+-rtlview Yes
+-hierarchy_separator /
+-bus_delimiter <>
+-case Maintain

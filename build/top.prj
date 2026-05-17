@@ -1,0 +1,5 @@
+vhdl work "../src/infrastructure/debounce.vhd"
+vhdl work "../src/infrastructure/rotary_decoder.vhd"
+vhdl work "../src/infrastructure/spi_master.vhd"
+vhdl work "../src/infrastructure/lcd_controller.vhd"
+vhdl work "../src/top.vhd"
