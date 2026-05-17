@@ -1,0 +1,496 @@
+Copyright © 2018 ROLAND CORPORATION 01
+Owner’s Manual
+TR-808 Software Rhythm Composer
+2
+Introduction
+For details on the settings for the DAW software that you’re using, refer to the DAW’s help or
+manuals.
+About Trademarks
+• VST is a trademark and software of Steinberg Media Technologies GmbH.
+• Roland is a registered trademark or trademark of Roland Corporation in the United States and/or other
+countries.
+• Company names and product names appearing in this document are registered trademarks or trademarks of
+their respective owners.
+3
+Screen Structure
+Main window
+This area shows various knobs and sliders that you can use to
+edit the sound.
+Use the [PANEL] button to switch
+[GAIN] knob
+Adjusts the gain of each instrument.
+[PAN] knob
+Adjusts the pan (left/right position) of each instrument.
+[TUNE] knob
+Adjusts the pitch of each instrument.
+[PANEL] button
+Instrument pads
+Sound is produced when you click these.
+While a pattern plays, these pads light to indicate the playback
+steps of the instrument selected by the [INSTRUMENT SELECT]
+knob.
+[A]–[H] buttons
+Switch the variation (A–H) that plays.
+To make a multiple selection, hold down the [Shift] key.
+The currently playing variation button blinks.
+[START/STOP] button
+Plays or stops the pattern.
+[EDIT] button
+Displays the pattern edit area.
+[LIST] button
+Displays the Memory Select window.
+Display (upper line)
+Shows the bank name.
+Level meter
+Shows the output level.
+Display (center line / lower line)
+Shows the selected pattern name and kit name.
+[ ] [ ] buttons
+Recall the previous or next pattern or kit.
+[WRITE] button
+Saves the pattern or kit.
+Instrument edit section
+Here you can edit the tonal character of the instruments. You can use 11 different instruments (BD–CH) in a pattern.
+[LEVEL] knob
+Adjusts the volume of the instrument.
+[TONE] knob
+Adjusts the tension of the head for the
+bass drum or snare drum; adjusts the
+tonal character for the cymbal.
+[TUNING] knob
+Adjusts the pitch of the tom or conga.
+[DECAY] knob
+Adjusts the decay of the sound.
+Turning the knob toward the left makes
+the sound crisper, and turning it toward
+the right extends the decay.
+[SNAPPY] knob
+Corresponds to the resonating wires of a
+snare drum.
+Turning the knob toward the left
+produces the sound of when the
+resonating wires are removed.
+Instrument select switch
+This switch selects one of two
+instruments. The two instruments cannot
+be played simultaneously.
+[VOLUME] knob
+Adjusts the volume.
+[INSTRUMENT SELECT] knob
+Selects the instrument that is indicated by the instrument pads.
+[SHUFFLE] knob
+Adjusts the amount of shuffle (swing).
+* This is multiplied with each instrument’s shuffle setting in
+Pattern Edit. If the instrument’s shuffle setting is 0, shuffle is
+not applied even if you turn this knob.
+[OPTION] button
+Lets you make various settings, or authorize the software.
+[HELP] button
+Displays help.
+[ABOUT] button
+Displays information about TR-808 Software Rhythm Composer.
+[PANEL] button
+Switches the instrument edit section’s display to GAIN, PAN, and
+TUNE (Bass Drum only).
+4
+Sound Engine Structure
+PATTERN 128
+PATTERN 3
+PATTERN 2
+PATTERN 1
+KIT 128
+KIT 3
+KIT 2
+KIT 1
+INST
+INST
+Parameter
+BD
+INST
+Parameter
+SD
+INST
+Parameter
+RC
+KIT
+Parameter
+PATTERN 128 patterns KIT 128 kits
+BANK
+B STEP data
+H STEP data
+A STEP data
+VARIATION
+Pattern
+Setting
+TR-808 Software Rhythm Composer
+BANK 1
+Patterns Kits
+Pattern 1
+Pattern 2
+Pattern 3
+•
+•
+Pattern 128
+Kit 1
+Kit 2
+Kit 3
+•
+•
+Kit 128
+128 patterns 128 kits
+BANK 2
+Patterns Kits
+Pattern 1
+Pattern 2
+Pattern 3
+•
+•
+Pattern 128
+Kit 1
+Kit 2
+Kit 3
+•
+•
+Kit 128
+128 patterns 128 kits
+There is no limit on the number of banks
+What Is a “PATTERN”?
+The performance data that you
+record is called a “pattern.”
+The TR-808 Software Rhythm
+Composer has 128 patterns (16
+patterns x 8 banks); each pattern
+has eight variations (A–H).
+What Is a “KIT”?
+The 11 instruments are collectively
+called a “kit.”
+The TR-808 Software Rhythm
+Composer has 128 kits.
+The pattern plays the instruments
+of the currently selected kit.
+Variation
+Pattern 1–128
+A B C D
+E F G H
+Kit 1–128
+Instrument x 11
+BASS
+DRUM
+A pattern plays the inst of
+the kit.
+Variation
+Pattern 1–128
+A B C D
+E F G H
+5
+Edit Window
+Parameter Value/Explanation
+EDIT VARIATION SELECT buttons A–H: Select the variation that you want to edit.
+CURRENT: Select the currently playing variation.
+[SCALE] button Selects the scale. The scale changes each time you press the button.
+The vertical stripes that are the background of the step buttons are spaced at quarter-note intervals.
+[LAST STEP] button Specifies the length of the pattern. You can set this individually for each instrument.
+[WEAK] button Turn this on to enter weak beats.
+[FLAM] button Turn this on to enter a flam.
+FlAM TYPE
+Specifies the spacing of the flam. Click the text “TYPE.”
+TYPE1: 0msec
+TYPE2–9: Specify a spacing of 20–48 msec in 4 msec units.
+[SUB STEP] button Turn this on to enter sub steps.
+SUB STEP TYPE
+Specifies the type of sub step. Click the text “TYPE.”
+TYPE1: Duplets
+TYPE2: Triplets
+TYPE3: Quadruplets
+TOTAL ACCENT
+Illuminate the steps that you want to accent.
+The strength of the accent is specified by the ACCENT [LEVEL] knob in the main window. (Accents
+apply to the same step of all instruments.)
+Instrument selection Select the instruments for which the variation/step is shown in the main window or edit window.
+Parameter Value/Explanation
+Variation indicator
+This indicates the variation A–H that is playing for each instrument.
+Even if different instruments have a different LAST STEP setting, and the variations being played do
+not match, this shows the currently playing variation for each instrument.
+[M] (mute) / [S] (solo) button Specify mute/solo settings for each instrument (solo has priority).
+[SHUFFLE] slider Specifies the amount of shuffle (rhythmic bounce) for each instrument.
+If the shuffle setting in the main window is set to “0,” this has no effect.
+Step sequencer area This is a step sequencer that shows all instruments as a list.
+Specifying the Pattern Length (LAST STEP)
+1. Click the [LAST STEP] button
+The [LAST STEP] button blinks purple.
+The default is 16 steps.
+2. For each instrument, press the button that you want to specify as the last step;
+the button blinks.
+Inputting Steps
+1. For each instrument, input steps by making the step buttons lit or unlit.
+Lit steps produce sound; unlit steps are silent.
+Inputting the Total Accent (TOTAL ACCENT)
+The top row of step buttons are for inputting the total accent.
+1. Make the button light for each step at which you want to apply an accent.
+An accented note is heard for all instruments that sound at a step whose total accent button
+is lit.
+6
+Edit Window
+Inputting Weak Beats
+1. Click the [WEAK] button.
+The [WEAK] button is lit white, allowing you to input weak beats.
+2. Turn on the steps that you want to play as weak beats.
+The steps for which you input a weak beat are lit dimly.
+MEMO
+Even without making the [WEAK] button lit, you can input a weak beat by clicking a step
+while holding down the [SHIFT] key.
+Specifying a Flam
+1. Click the [FLAM] button.
+The [FLAM] button is lit yellow, allowing you to enter flams.
+Click “FLAM TYPE” to select the flam spacing.
+2. Turn on the steps at which you want to play a flam.
+You can enter flams in combination with weak beats.
+Inputting Sub Steps
+1. Click the [SUB STEP] button.
+The [SUB STEP] button is lit, allowing you to enter sub steps.
+Click “SUB STEP TYPE” to select the sub step type.
+Depending on the sub step type, this is lit light blue (duplets), green (triplets), or dark blue
+(quadruplets).
+2. Turn on the steps at which you want to play a sub step.
+You can enter sub steps in combination with weak beats.
+7
+Edit Window
+Editing a Variation
+Right-click the EDIT VARATION SELECT button to use the following functions.
+Function Explanation
+COPY Copies the patterns of all instruments in the selected variation.
+PASTE Pastes the copied variation to the selected variation. The variation is overwritten.
+CLEAR Erases the selected variation.
+Editing an Instrument
+Right-click an instrument name at the left side of the edit area to use the following functions.
+Function Explanation
+COPY Copies the pattern of the selected instrument.
+PASTE Pastes the copied pattern to the selected instrument.
+The instrument is overwritten.
+CLEAR Erases the pattern of the selected instrument.
+INVERT Exchanges the steps that sound the selected instrument with the steps that are silent.
+ALL Turns on all steps of the selected instrument so that they all sound.
+Placing a Pattern in a DAW Track
+Performance data from the variation [A]–[H] buttons can be placed in a track of your DAW,
+either as MIDI or audio data.
+Use the [OPTION] button to choose whether you’re placing MIDI data or audio data.
+Drag and drop
+8
+Edit Window
+DAW Multi-Out Support
+If you’re using this plug-in with a host application that supports multiple output, you can use a
+different output for each instrument.
+The output assignment for each instrument is as follows.
+Output Instrument
+Main out Mix
+Sub out 1 Bass Drum
+Sub out 2 Snare Drum
+Sub out 3 Low Tom / Low Conga
+Sub out 4 Mid Tom / Mid Conga
+Sub out 5 High Tom / High Conga
+Sub out 6 Rim Shot / Claves
+Sub out 7 Hand Clap / Maracas
+Sub out 8 Closed Hihat
+Sub out 9 Open Hihat
+Sub out 10 Cymbal
+Sub out 11 Cowbell
+* For more about multi-output settings in your host application, refer to the help or owner’s
+manual of your host application.
+How Note Numbers Select Sounds or Variations
+Note numbers received by TR-808 Software Rhythm Composer select the following sounds or
+variations.
+Note number Sound/Function
+24–31 Variation Select A–H
+35, 36 Bass Drum
+37 Rim shot/Claves
+38, 40 Snare Drum
+39 HandClap/Maracas
+42, 44 Closed HiHat
+41, 43 LoTom/LoConga
+46 Open HiHat
+45, 47 MidTom/MidConga
+49 Cymbal
+48, 50 HiTom/HiConga
+51 Cowbell
+About CC (Control Change)
+TR-808 Software Rhythm Composer receives the following CC messages.
+CC# Parameter
+9 SHUFFLE
+20 BD TUNE
+21 BD TONE
+22 BD COMP
+23 BD DECAY
+24 BD LEVEL
+25 SD TONE
+26 SD SNAPPY
+27 SD COMP
+28 SD DECAY
+29 SD LEVEL
+46 LT TUNE
+47 LT DECAY
+48 LT LEVEL
+49 MT TUNE
+50 MT DECAY
+51 MT LEVEL
+52 HT TUNE
+53 HT DECAY
+54 HT LEVEL
+55 RS TUNE
+56 RS DECAY
+57 RS LEVEL
+58 CP TUNE
+CC# Parameter
+59 CP DECAY
+60 CP LEVEL
+61 CH TUNE
+62 CH DECAY
+63 CH LEVEL
+71 TOTAL ACCENT
+80 OH TUNE
+81 OH DECAY
+82 OH LEVEL
+83 CY TONE
+84 CY DECAY
+85 CY LEVEL
+86 CB TUNE
+87 CB DECAY
+88 CB LEVEL
+9
+Patterns/Kits and Banks
+1. Click the [LIST] button.
+The Memory Select window opens.
+The selected memory is
+highlighted.
+[WRITE] button
+Saves the edited pattern/kit as a
+memory in the bank.
+[RENAME] button
+Renames the selected memory.
+[NEW] button
+Creates a new empty bank.
+[DELETE] button
+Deletes the selected bank.
+[LOAD] button
+Loads a bank from a file.
+[SAVE] button
+Exports a bank as a file.
+[READ] button
+Loads a memory from a bank.
+Switches between patterns and kits.
+“ i ” symbol
+When you place the mouse cursor (mouse pointer) over this, a list
+of shortcuts appears.
+Bank
+A “bank” contains 128 patterns and 128 kits. By switching
+banks, you can access a large number of patterns or kits. A
+bank can be saved as a file.
+Changing to Other Bank
+1. Click the Bank field.
+The bank list window opens.
+2. Click the bank that you want to recall.
+By pressing the [H] [I] buttons located at the right of the bank field, you can switch to the next
+or previous bank.
+Exporting the Bank
+Here’s how to export a bank as a file.
+1. Click the [SAVE] button.
+The file name input window opens.
+2. Enter a file name and save.
+The file is exported.
+Importing a Bank
+1. Click the [LOAD] button.
+The file selection window opens.
+2. Select a file and load it.
+The bank is loaded.
+Bank
+1 1
+Pattern Kit
+2 2
+3 3
+128 128
+10
+Patterns/Kits and Banks
+Creating/Deleting a Bank
+Creating a bank
+Click the [NEW] button to create a new empty bank.
+Deleting a bank
+Here’s how to delete the selected bank.
+1. Select a bank as described in“Changing to Other Bank” (p. 9).
+2. Click the [DELETE] button.
+A confirmation message appears.
+3. Click [OK] to delete the bank.
+Renaming a Bank
+1. Select a bank as described in “Changing to Other Bank” (p. 9).
+2. At the left of the bank field, click J.
+3. Edit the name and press the [Return (Enter)] key.
+Patterns and Kits
+TR-808 Software Rhythm Composer manages 128 patterns and kits as one bank.
+Loading a Pattern or Kit
+Here’s how to load a pattern or kit that’s saved in a bank. When you load a pattern or kit, its
+settings are shown in the edit area, allowing you to edit the settings.
+1. Click the number of the memory that you want to load.
+2. Click the [READ] button. Or press the [Return (Enter)] key.
+The pattern or kit is loaded.
+* You can also load a pattern or kit by double-clicking the pattern or kit number.
+Saving a Pattern or Kit
+Here’s how to save your edited sounds in the bank as a pattern or kit.
+1. Click the number of the memory in which you want to save the sound.
+2. Click the [WRITE] button.
+The pattern or kit are saved in the bank.
+Renaming a Pattern or Kit
+1. Click the number of the memory that you want to rename.
+2. Click the [RENAME] button.
+3. Change the memory name. (Up to 16 letters)
+11
+Patterns/Kits and Banks
+MIDI Learn Function
+Here’s how to associate a MIDI control change with a sound parameter, so that the parameter
+can be controlled by that MIDI message.
+Procedure
+1. Right-click the sound parameter controller (knob or slider).
+2. Choose “Learn MIDI CC.”
+3. Operate your external MIDI device to transmit a control change message.
+NOTE
+You can’t associate more than one MIDI control change with a single controller. Only the
+most recent setting is used.
+Cancelling
+1. Right-click the sound parameter controller (knob or slider).
+2. Choose “Forget MIDI CC.”
+12
+Setting
+Option
+1. Click the [OPTION] button.
+2. Select items.
+A is shown for the selected item.
+Item Explanation
+Layout
+Original: This is the conventional screen layout.
+Compact: This condenses the space for other
+than knobs and buttons, using less screen area.
+Zoom Changes the size of the main window.
+Position Lock to DAW
+Specifies whether TR-808 Software Rhythm
+Composer synchronizes with your DAW’s start/
+stop operations and playback position.
+Turn synchronization off if you’re using the
+tracks of your DAW to play the rhythm.
+Drag & Drop Pattern
+as MIDI
+When you place variation performance data in
+your DAW, it is placed as MIDI data.
+Drag & Drop Pattern as
+Audio
+When you place variation performance data in
+your DAW, it is placed as audio data.
+Optimize for Lower CPU
+Usage
+Turn this ON if CPU usage is high, and clicks or
+pops occur.
+Flip Scroll Direction
+ Inverts the direction of rotation when using
+the mouse wheel to edit a value (Only on Mac).
+The direction is inverted if Flip Scroll Direction
+is set to ON.
+Roland Cloud... Displays the Roland Cloud site.
+Authentication... Performs user authentication for the TR-808
+Software Rhythm Composer.
