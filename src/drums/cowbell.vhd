@@ -2,8 +2,6 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
--- Cowbell: 2 free-running square waves (540Hz + 800Hz) + HPF. Decay 50ms.
-
 entity cowbell is
   port (
     clk         : in  std_logic;
@@ -16,19 +14,23 @@ end entity cowbell;
 
 architecture rtl of cowbell is
   signal p0, p1 : unsigned(15 downto 0) := (others => '0');
-  signal amp    : unsigned(11 downto 0) := (others => '0');
+  signal amp    : unsigned(15 downto 0) := (others => '0');
   signal active : std_logic := '0';
-  signal prev   : signed(11 downto 0) := (others => '0');
+  signal lp_acc : signed(15 downto 0) := (others => '0');
+  signal hp_acc : signed(15 downto 0) := (others => '0');
 begin
   process(clk)
     variable sq : signed(2 downto 0);
-    variable raw, hp : signed(11 downto 0);
+    variable raw : signed(15 downto 0);
+    variable bp_out : signed(15 downto 0);
+    variable product : signed(23 downto 0);
   begin
     if rising_edge(clk) then
       if rst = '1' then
         p0 <= (others => '0'); p1 <= (others => '0');
         amp <= (others => '0'); active <= '0';
-        prev <= (others => '0'); audio_out <= (others => '0');
+        lp_acc <= (others => '0'); hp_acc <= (others => '0');
+        audio_out <= (others => '0');
       else
         if sample_tick = '1' then
           p0 <= p0 + to_unsigned(725, 16);   -- 540Hz
@@ -36,8 +38,7 @@ begin
         end if;
 
         if trigger = '1' then
-          active <= '1';
-          amp <= to_unsigned(2047, 12);
+          active <= '1'; amp <= to_unsigned(65535, 16);
         end if;
 
         if sample_tick = '1' and active = '1' then
@@ -45,21 +46,20 @@ begin
           if p0(15) = '1' then sq := sq + 1; else sq := sq - 1; end if;
           if p1(15) = '1' then sq := sq + 1; else sq := sq - 1; end if;
 
-          -- Scale: sq is -2..+2, scale to ±amp/2
-          raw := resize(sq, 12) * signed("00" & amp(11 downto 2));
-          -- 3-bit * 10-bit = fine
+          -- Scale: ±2 * 512 = ±1024
+          raw := shift_left(resize(sq, 16), 9);
 
-          -- HPF
-          hp := raw - prev;
-          prev <= raw;
-          audio_out <= hp;
+          -- Bandpass: LP then subtract HP
+          lp_acc <= lp_acc + shift_right(raw - lp_acc, 2);
+          hp_acc <= hp_acc + shift_right(lp_acc - hp_acc, 4);
+          bp_out := lp_acc - hp_acc;
 
-          -- Decay: 50ms = subtract 1 per sample
-          if amp > 0 then
-            amp <= amp - 1;
-          else
-            active <= '0';
-            audio_out <= (others => '0');
+          product := bp_out(15 downto 4) * signed('0' & amp(15 downto 5));
+          audio_out <= product(22 downto 11);
+
+          -- Exponential decay K=11 (tau ~42ms)
+          amp <= amp - ("00000000000" & amp(15 downto 11));
+          if amp < 64 then active <= '0'; audio_out <= (others => '0');
           end if;
         elsif active = '0' then
           audio_out <= (others => '0');

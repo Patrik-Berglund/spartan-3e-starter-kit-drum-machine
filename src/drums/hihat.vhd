@@ -2,8 +2,6 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
--- Closed Hi-Hat: 6 free-running square oscillators + HPF. Decay 50ms.
-
 entity hihat is
   port (
     clk         : in  std_logic;
@@ -16,13 +14,16 @@ end entity hihat;
 
 architecture rtl of hihat is
   signal p0, p1, p2, p3, p4, p5 : unsigned(15 downto 0) := (others => '0');
-  signal amp    : unsigned(11 downto 0) := (others => '0');
-  signal active : std_logic := '0';
-  signal prev   : signed(11 downto 0) := (others => '0');
+  signal amp     : unsigned(15 downto 0) := (others => '0');
+  signal active  : std_logic := '0';
+  -- 4-stage HPF accumulators
+  signal hp_acc0, hp_acc1, hp_acc2, hp_acc3 : signed(15 downto 0) := (others => '0');
 begin
   process(clk)
     variable sq : signed(3 downto 0);
-    variable raw, hp : signed(11 downto 0);
+    variable raw : signed(15 downto 0);
+    variable x0, x1, x2, x3 : signed(15 downto 0);
+    variable product : signed(23 downto 0);
   begin
     if rising_edge(clk) then
       if rst = '1' then
@@ -30,25 +31,25 @@ begin
         p2 <= (others => '0'); p3 <= (others => '0');
         p4 <= (others => '0'); p5 <= (others => '0');
         amp <= (others => '0'); active <= '0';
-        prev <= (others => '0'); audio_out <= (others => '0');
+        hp_acc0 <= (others => '0'); hp_acc1 <= (others => '0');
+        hp_acc2 <= (others => '0'); hp_acc3 <= (others => '0');
+        audio_out <= (others => '0');
       else
-        -- Free-running oscillators (always advance)
         if sample_tick = '1' then
-          p0 <= p0 + to_unsigned(274, 16);   -- 204.7Hz
-          p1 <= p1 + to_unsigned(408, 16);   -- 304.4Hz
-          p2 <= p2 + to_unsigned(496, 16);   -- 369.6Hz
-          p3 <= p3 + to_unsigned(701, 16);   -- 522.7Hz
-          p4 <= p4 + to_unsigned(725, 16);   -- 540.4Hz
-          p5 <= p5 + to_unsigned(1074, 16);  -- 800.6Hz
+          p0 <= p0 + to_unsigned(274, 16);
+          p1 <= p1 + to_unsigned(408, 16);
+          p2 <= p2 + to_unsigned(496, 16);
+          p3 <= p3 + to_unsigned(701, 16);
+          p4 <= p4 + to_unsigned(725, 16);
+          p5 <= p5 + to_unsigned(1074, 16);
         end if;
 
         if trigger = '1' then
           active <= '1';
-          amp <= to_unsigned(2047, 12);
+          amp <= to_unsigned(65535, 16);
         end if;
 
         if sample_tick = '1' and active = '1' then
-          -- Sum 6 square waves: +1/-1 each
           sq := to_signed(0, 4);
           if p0(15) = '1' then sq := sq + 1; else sq := sq - 1; end if;
           if p1(15) = '1' then sq := sq + 1; else sq := sq - 1; end if;
@@ -57,23 +58,28 @@ begin
           if p4(15) = '1' then sq := sq + 1; else sq := sq - 1; end if;
           if p5(15) = '1' then sq := sq + 1; else sq := sq - 1; end if;
 
-          -- Scale by amplitude: sq is -6..+6, scale to ±amp
-          -- raw = sq * (amp/6) ≈ sq * amp/8 (shift right 3)
-          raw := resize(sq, 12) * signed('0' & amp(11 downto 3));
-          -- This is a 4-bit * 9-bit = 13-bit multiply. Take low 12.
-          raw := raw;
+          -- Scale: sq*170
+          raw := shift_left(resize(sq, 16), 7) + shift_left(resize(sq, 16), 5) +
+                 shift_left(resize(sq, 16), 3) + shift_left(resize(sq, 16), 1);
 
-          -- High-pass filter: output = current - previous
-          hp := raw - prev;
-          prev <= raw;
+          -- 4-stage HPF (24dB/oct)
+          hp_acc0 <= hp_acc0 + shift_right(raw - hp_acc0, 3);
+          x0 := raw - hp_acc0;
+          hp_acc1 <= hp_acc1 + shift_right(x0 - hp_acc1, 3);
+          x1 := x0 - hp_acc1;
+          hp_acc2 <= hp_acc2 + shift_right(x1 - hp_acc2, 3);
+          x2 := x1 - hp_acc2;
+          hp_acc3 <= hp_acc3 + shift_right(x2 - hp_acc3, 3);
+          x3 := x2 - hp_acc3;
 
-          -- Saturate
-          audio_out <= hp;
+          -- Multiply by amplitude
+          product := x3(15 downto 4) * signed('0' & amp(15 downto 5));
+          audio_out <= product(22 downto 11);
 
-          -- Linear decay: 50ms = 2441 samples. Subtract 1 per sample = 42ms.
-          if amp > 0 then
-            amp <= amp - 1;
-          else
+          -- Exponential decay: K=11 (tau ~42ms)
+          amp <= amp - ("00000000000" & amp(15 downto 11));
+
+          if amp < 512 then
             active <= '0';
             audio_out <= (others => '0');
           end if;

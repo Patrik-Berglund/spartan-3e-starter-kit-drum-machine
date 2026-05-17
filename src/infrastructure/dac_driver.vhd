@@ -48,7 +48,7 @@ begin
   dac_clr     <= '1';  -- not in reset
 
   u_spi : entity work.spi_master
-    generic map (G_CLK_DIV => 4)  -- 50MHz/8 = 6.25 MHz SPI clock
+    generic map (G_CLK_DIV => 2)  -- 50MHz/4 = 12.5 MHz SPI clock
     port map (
       clk      => clk,
       rst      => rst,

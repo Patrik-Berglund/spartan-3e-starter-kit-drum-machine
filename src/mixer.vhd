@@ -48,17 +48,17 @@ begin
         end if;
 
         -- Low-pass filter: smooths harsh edges
-        -- lp += (input - lp) / 2  (cutoff ~12kHz at 48.8kHz sample rate)
+        -- lp += (input - lp) / 4  (cutoff ~6kHz)
         diff := resize(sat, 16) - lp_state;
-        lp_state <= lp_state + shift_right(diff, 1);
+        lp_state <= lp_state + shift_right(diff, 2);
 
-        -- Output filtered signal
-        if lp_state(15 downto 12) = "0000" or lp_state(15 downto 12) = "1111" then
-          mix_out <= unsigned(lp_state(11 downto 0) + 2048);
-        elsif lp_state > 2047 then
+        -- Output: saturate lp_state to 12-bit, convert to unsigned
+        if lp_state > 2047 then
           mix_out <= to_unsigned(4095, 12);
-        else
+        elsif lp_state < -2048 then
           mix_out <= to_unsigned(0, 12);
+        else
+          mix_out <= unsigned(lp_state(11 downto 0) + 2048);
         end if;
       end if;
     end if;

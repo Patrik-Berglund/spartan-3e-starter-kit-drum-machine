@@ -2,9 +2,6 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
--- Bass Drum: Phase accumulator square wave at 56Hz with pitch sweep from 112Hz.
--- Linear amplitude decay over 500ms. Full-scale output.
-
 entity kick_drum is
   port (
     clk         : in  std_logic;
@@ -18,11 +15,36 @@ end entity kick_drum;
 architecture rtl of kick_drum is
   signal phase  : unsigned(15 downto 0) := (others => '0');
   signal freq   : unsigned(15 downto 0) := (others => '0');
-  signal amp    : unsigned(11 downto 0) := (others => '0');
+  signal amp    : unsigned(15 downto 0) := (others => '0');  -- 16-bit for smooth exp decay
   signal active : std_logic := '0';
-  signal div    : unsigned(3 downto 0) := (others => '0');
+  signal div    : unsigned(2 downto 0) := (others => '0');
+
+  type sine_t is array(0 to 63) of signed(11 downto 0);
+  constant SINE : sine_t := (
+    to_signed(0,12),to_signed(201,12),to_signed(399,12),to_signed(594,12),
+    to_signed(783,12),to_signed(965,12),to_signed(1137,12),to_signed(1299,12),
+    to_signed(1447,12),to_signed(1582,12),to_signed(1702,12),to_signed(1805,12),
+    to_signed(1891,12),to_signed(1959,12),to_signed(2008,12),to_signed(2037,12),
+    to_signed(2047,12),to_signed(2037,12),to_signed(2008,12),to_signed(1959,12),
+    to_signed(1891,12),to_signed(1805,12),to_signed(1702,12),to_signed(1582,12),
+    to_signed(1447,12),to_signed(1299,12),to_signed(1137,12),to_signed(965,12),
+    to_signed(783,12),to_signed(594,12),to_signed(399,12),to_signed(201,12),
+    to_signed(0,12),to_signed(-201,12),to_signed(-399,12),to_signed(-594,12),
+    to_signed(-783,12),to_signed(-965,12),to_signed(-1137,12),to_signed(-1299,12),
+    to_signed(-1447,12),to_signed(-1582,12),to_signed(-1702,12),to_signed(-1805,12),
+    to_signed(-1891,12),to_signed(-1959,12),to_signed(-2008,12),to_signed(-2037,12),
+    to_signed(-2047,12),to_signed(-2037,12),to_signed(-2008,12),to_signed(-1959,12),
+    to_signed(-1891,12),to_signed(-1805,12),to_signed(-1702,12),to_signed(-1582,12),
+    to_signed(-1447,12),to_signed(-1299,12),to_signed(-1137,12),to_signed(-965,12),
+    to_signed(-783,12),to_signed(-594,12),to_signed(-399,12),to_signed(-201,12)
+  );
+
+  signal sine_val : signed(11 downto 0);
 begin
+  sine_val <= SINE(to_integer(phase(15 downto 10)));
+
   process(clk)
+    variable product : signed(23 downto 0);
   begin
     if rising_edge(clk) then
       if rst = '1' then
@@ -33,35 +55,30 @@ begin
         if trigger = '1' then
           active <= '1';
           phase <= (others => '0');
-          freq  <= to_unsigned(150, 16);  -- start at 112Hz
-          amp   <= to_unsigned(2047, 12); -- full scale
+          freq  <= to_unsigned(150, 16);  -- 112Hz
+          amp   <= to_unsigned(65535, 16);
           div   <= (others => '0');
         end if;
 
         if sample_tick = '1' and active = '1' then
           phase <= phase + freq;
-
-          -- Pitch sweep: 112Hz -> 56Hz over ~30ms (1465 samples)
-          -- Decrement by 1 every 20 samples: (150-75)/1465*20 ≈ 1
           div <= div + 1;
-          if div = 0 and freq > 75 then
+
+          -- Pitch sweep: 112Hz->56Hz in ~10ms (dec by 1 every 7 samples)
+          if div = "110" and freq > 75 then
             freq <= freq - 1;
+            div <= (others => '0');
           end if;
 
-          -- Square wave output scaled by amplitude
-          if phase(15) = '1' then
-            audio_out <= signed(resize(amp, 12));
-          else
-            audio_out <= -signed(resize(amp, 12));
-          end if;
+          -- Multiply sine by amplitude: 12-bit * 11-bit = 23-bit
+          product := sine_val * signed('0' & amp(15 downto 5));
+          audio_out <= product(22 downto 11);
 
-          -- Linear decay: subtract 1 every 12 samples = 502ms total
-          if div(3 downto 0) = "1011" then
-            if amp > 0 then
-              amp <= amp - 1;
-            else
-              active <= '0';
-            end if;
+          -- Exponential decay: amp -= amp >> 12 (tau ~84ms)
+          amp <= amp - ("000000000000" & amp(15 downto 12));
+
+          if amp < 64 then
+            active <= '0';
           end if;
         elsif active = '0' then
           audio_out <= (others => '0');

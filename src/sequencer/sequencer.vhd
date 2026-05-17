@@ -56,18 +56,18 @@ begin
         play_reg <= '1';  -- auto-play on startup
         step_reg <= (others => '0');
         -- Demo pattern: classic 808 beat
-        patterns(0)  <= "0000000000000000"; -- AC (accent)
-        patterns(1)  <= "1000000010000000"; -- BD (kick on 1, 9)
-        patterns(2)  <= "0000100000001000"; -- SD (snare on 5, 13)
+        patterns(0)  <= "0000000000000000"; -- AC
+        patterns(1)  <= "0000000100000001"; -- BD (step 0, 8)
+        patterns(2)  <= "0001000000010000"; -- SD (step 4, 12)
         patterns(3)  <= "0000000000000000"; -- LT
         patterns(4)  <= "0000000000000000"; -- MT
         patterns(5)  <= "0000000000000000"; -- HT
         patterns(6)  <= "0000000000000000"; -- RS
-        patterns(7)  <= "0000000000100000"; -- CP (clap on 11)
+        patterns(7)  <= "0000010000000000"; -- CP (step 10)
         patterns(8)  <= "0000000000000000"; -- CB
         patterns(9)  <= "0000000000000000"; -- CY
-        patterns(10) <= "0000000010000000"; -- OH (open hat on 9)
-        patterns(11) <= "1010101010101010"; -- CH (closed hat every 2)
+        patterns(10) <= "0000000100000000"; -- OH (step 8)
+        patterns(11) <= "0101010101010101"; -- CH (every even step)
       else
         -- Play/stop toggle
         if play_stop = '1' then

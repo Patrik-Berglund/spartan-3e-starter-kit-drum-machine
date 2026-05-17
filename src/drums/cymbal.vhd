@@ -2,8 +2,6 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
--- Cymbal: 6 free-running square oscillators + HPF. Decay 800ms.
-
 entity cymbal is
   port (
     clk         : in  std_logic;
@@ -16,14 +14,14 @@ end entity cymbal;
 
 architecture rtl of cymbal is
   signal p0, p1, p2, p3, p4, p5 : unsigned(15 downto 0) := (others => '0');
-  signal amp    : unsigned(11 downto 0) := (others => '0');
-  signal active : std_logic := '0';
-  signal prev   : signed(11 downto 0) := (others => '0');
-  signal div    : unsigned(4 downto 0) := (others => '0');
+  signal amp     : unsigned(15 downto 0) := (others => '0');
+  signal active  : std_logic := '0';
+  signal hp_acc0, hp_acc1, hp_acc2, hp_acc3 : signed(15 downto 0) := (others => '0');
 begin
   process(clk)
     variable sq : signed(3 downto 0);
-    variable raw, hp : signed(11 downto 0);
+    variable raw, x0, x1, x2, x3 : signed(15 downto 0);
+    variable product : signed(23 downto 0);
   begin
     if rising_edge(clk) then
       if rst = '1' then
@@ -31,7 +29,8 @@ begin
         p2 <= (others => '0'); p3 <= (others => '0');
         p4 <= (others => '0'); p5 <= (others => '0');
         amp <= (others => '0'); active <= '0';
-        prev <= (others => '0'); div <= (others => '0');
+        hp_acc0 <= (others => '0'); hp_acc1 <= (others => '0');
+        hp_acc2 <= (others => '0'); hp_acc3 <= (others => '0');
         audio_out <= (others => '0');
       else
         if sample_tick = '1' then
@@ -44,9 +43,7 @@ begin
         end if;
 
         if trigger = '1' then
-          active <= '1';
-          amp <= to_unsigned(2047, 12);
-          div <= (others => '0');
+          active <= '1'; amp <= to_unsigned(65535, 16);
         end if;
 
         if sample_tick = '1' and active = '1' then
@@ -58,21 +55,27 @@ begin
           if p4(15) = '1' then sq := sq + 1; else sq := sq - 1; end if;
           if p5(15) = '1' then sq := sq + 1; else sq := sq - 1; end if;
 
-          raw := resize(sq, 12) * signed('0' & amp(11 downto 3));
-          hp := raw - prev;
-          prev <= raw;
-          audio_out <= hp;
+          raw := shift_left(resize(sq, 16), 7) + shift_left(resize(sq, 16), 5) +
+                 shift_left(resize(sq, 16), 3) + shift_left(resize(sq, 16), 1);
 
-          -- Decay: 800ms = subtract 1 every 19 samples
-          div <= div + 1;
-          if div = 18 then
-            div <= (others => '0');
-            if amp > 0 then
-              amp <= amp - 1;
-            else
-              active <= '0';
-              audio_out <= (others => '0');
-            end if;
+          -- 4-stage HPF with shift=4 (lower cutoff for more body)
+          hp_acc0 <= hp_acc0 + shift_right(raw - hp_acc0, 4);
+          x0 := raw - hp_acc0;
+          hp_acc1 <= hp_acc1 + shift_right(x0 - hp_acc1, 4);
+          x1 := x0 - hp_acc1;
+          hp_acc2 <= hp_acc2 + shift_right(x1 - hp_acc2, 4);
+          x2 := x1 - hp_acc2;
+          hp_acc3 <= hp_acc3 + shift_right(x2 - hp_acc3, 4);
+          x3 := x2 - hp_acc3;
+
+          product := x3(15 downto 4) * signed('0' & amp(15 downto 5));
+          audio_out <= product(22 downto 11);
+
+          -- Exponential decay K=15 (tau ~670ms)
+          amp <= amp - ("000000000000000" & amp(15 downto 15));
+
+          if amp < 512 then
+            active <= '0'; audio_out <= (others => '0');
           end if;
         elsif active = '0' then
           audio_out <= (others => '0');
