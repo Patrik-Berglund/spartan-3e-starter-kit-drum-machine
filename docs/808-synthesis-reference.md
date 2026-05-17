@@ -99,3 +99,8 @@ Start freq: 320 Hz (inc = 6872)
 End freq: 51 Hz (inc = 1095)
 Sweep time: ~30ms = 1465 samples
 Per-sample freq decrement: (6872-1095)/1465 ≈ 4 per sample
+
+## Reference Samples
+
+Real TR-808 voice samples for A/B comparison:
+https://audio.com/drum-machine/collections/roland-tr-808
