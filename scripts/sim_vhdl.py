@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bit-exact VHDL simulator - integer arithmetic only, matching FPGA logic."""
 
-import os, wave, struct
+import os, wave
 import numpy as np
 
 SR = 48828
@@ -14,7 +14,6 @@ SINE = [0,201,399,594,783,965,1137,1299,1447,1582,1702,1805,1891,1959,2008,2037,
         -1137,-965,-783,-594,-399,-201]
 
 def lfsr_next(reg, taps):
-    """16-bit LFSR step. taps is list of bit positions for XOR feedback."""
     fb = 0
     for t in taps:
         fb ^= (reg >> t) & 1
@@ -25,60 +24,93 @@ def clip12(x):
     if x < -2048: return -2048
     return x
 
+
 def render_kick(n_samples):
+    """VHDL: kick_drum.vhd. Sine sweep 150→75, decay K=12, silence <64."""
     out = []
-    phase = 0; freq = 150; amp = 65535; count = 0
+    phase = 0; freq = 150; amp = 65535; div = 0
     for _ in range(n_samples):
-        if amp < 512:
+        if amp < 64:
             out.append(0); continue
+        # sine_val uses current phase (combinational in VHDL)
         s = SINE[(phase >> 10) & 63]
         val = (s * (amp >> 5)) >> 11
         out.append(clip12(val))
-        phase = (phase + freq) & 0xFFFF
-        amp -= amp >> 12
-        count += 1
-        if count >= 7 and freq > 75:
-            freq -= 1; count = 0
+        # Signal updates (all use old values, take effect simultaneously)
+        new_phase = (phase + freq) & 0xFFFF
+        new_div = (div + 1) & 7
+        new_freq = freq
+        if div == 6 and freq > 75:  # "110" = 6
+            new_freq = freq - 1
+            new_div = 0
+        new_amp = amp - (amp >> 12)
+        phase, freq, amp, div = new_phase, new_freq, new_amp, new_div
     return out
 
+
 def render_snare(n_samples):
+    """VHDL: snare_drum.vhd. Two sines + LFSR noise, silence <64 on both."""
     out = []
     phase1 = 0; phase2 = 0; tone_amp = 65535; noise_amp = 65535
     lfsr = 0xACE1
     for _ in range(n_samples):
-        if tone_amp < 512 and noise_amp < 512:
+        if tone_amp < 64 and noise_amp < 64:
             out.append(0); continue
+        # s1, s2 are combinational from current phase
         s1 = SINE[(phase1 >> 10) & 63]
         s2 = SINE[(phase2 >> 10) & 63]
-        lfsr = lfsr_next(lfsr, [15, 13, 12, 10])
-        noise_val = (noise_amp >> 5) if (lfsr & 1) else -(noise_amp >> 5)
-        mix = ((s1 * (tone_amp >> 5)) >> 12) + (((s2 * (tone_amp >> 5)) >> 11) >> 1) + (noise_val >> 1)
+        # LFSR feedback: bit15^bit13^bit12^bit10
+        new_lfsr = lfsr_next(lfsr, [15, 13, 12, 10])
+        # Tones
+        amp_s = tone_amp >> 5
+        p1 = s1 * amp_s
+        p2 = s2 * amp_s
+        # Noise: sign from lfsr(15) (OLD lfsr, before update)
+        n_s = noise_amp >> 5
+        noise = n_s if (lfsr >> 15) & 1 else -n_s
+        # Mix: p1(22:12) + shift_right(p2(22:11),1) + shift_right(noise,1)
+        t1 = p1 >> 12
+        t2 = (p2 >> 11) >> 1
+        t3 = noise >> 1
+        mix = t1 + t2 + t3
         out.append(clip12(mix))
+        # Updates
         phase1 = (phase1 + 319) & 0xFFFF
         phase2 = (phase2 + 638) & 0xFFFF
+        lfsr = new_lfsr
         tone_amp -= tone_amp >> 11
         noise_amp -= noise_amp >> 12
     return out
 
+
 def render_hihat_core(n_samples, decay_k, hpf_shift):
+    """VHDL: hihat/open_hihat/cymbal. 6 free-running oscs + 4-stage HPF."""
     incs = [274, 408, 496, 701, 725, 1074]
     phases = [0]*6
     hp_accs = [0]*4
     amp = 65535
     out = []
     for _ in range(n_samples):
-        if amp < 512:
-            out.append(0); continue
+        # sq reads OLD phase values (before increment)
         sq_sum = 0
         for i in range(6):
             sq_sum += 1 if (phases[i] & 0x8000) else -1
+        # Phases always advance (free-running, outside active check)
+        for i in range(6):
             phases[i] = (phases[i] + incs[i]) & 0xFFFF
+        if amp < 512:
+            out.append(0); continue
         raw = sq_sum * 170
+        # 4-stage HPF (signal semantics: x uses OLD accumulator value)
         hp = raw
+        new_accs = list(hp_accs)
         for j in range(4):
-            hp_accs[j] += (hp - hp_accs[j]) >> hpf_shift
-            hp = hp - hp_accs[j]
-        val = (hp >> 4) * (amp >> 5) >> 11
+            old_acc = hp_accs[j]
+            new_accs[j] = old_acc + ((hp - old_acc) >> hpf_shift)
+            hp = hp - old_acc
+        hp_accs = new_accs
+        # Output: hp(15:4) * signed('0' & amp(15:5)) >> product(22:11)
+        val = ((hp >> 4) * (amp >> 5)) >> 11
         out.append(clip12(val))
         amp -= amp >> decay_k
     return out
@@ -87,96 +119,129 @@ def render_ch(n_samples): return render_hihat_core(n_samples, 11, 3)
 def render_oh(n_samples): return render_hihat_core(n_samples, 12, 3)
 def render_cymbal(n_samples): return render_hihat_core(n_samples, 15, 4)
 
+
 def render_cowbell(n_samples):
+    """VHDL: cowbell.vhd. 2 oscs + bandpass, decay K=11, silence <64."""
     phases = [0, 0]; incs = [725, 1074]
     lp_acc = 0; hp_acc = 0; amp = 65535
     out = []
     for _ in range(n_samples):
-        if amp < 512:
-            out.append(0); continue
+        # sq reads OLD phase values
         sq = 0
         for i in range(2):
             sq += 1 if (phases[i] & 0x8000) else -1
+        # Phases always advance
+        for i in range(2):
             phases[i] = (phases[i] + incs[i]) & 0xFFFF
+        if amp < 64:
+            out.append(0); continue
         raw = sq * 512
-        lp_acc += (raw - lp_acc) >> 2
-        hp_acc += (lp_acc - hp_acc) >> 4
-        bp = lp_acc - hp_acc
+        # Bandpass (signal semantics: all reads use old values)
+        old_lp = lp_acc
+        old_hp = hp_acc
+        lp_acc = old_lp + ((raw - old_lp) >> 2)
+        hp_acc = old_hp + ((old_lp - old_hp) >> 4)
+        bp = old_lp - old_hp
         val = ((bp >> 4) * (amp >> 5)) >> 11
         out.append(clip12(val))
         amp -= amp >> 11
     return out
 
+
 def render_clap(n_samples):
-    lfsr = 0xBEEF; lp_acc = 0; hp_acc = 0; amp = 65535
+    """VHDL: clap.vhd. LFSR noise + bandpass, burst pattern, decay K=12 in tail."""
+    lfsr = 0xBEEF; lp_acc = 0; hp_acc = 0; amp = 65535; count = 0
     out = []
-    for i in range(n_samples):
-        if amp < 512 and i >= 2196:
+    for _ in range(n_samples):
+        if amp < 64 and count >= 2196:
             out.append(0); continue
-        lfsr = lfsr_next(lfsr, [15, 13, 11, 0])
-        noise = 1024 if (lfsr & 1) else -1024
-        lp_acc += (noise - lp_acc) >> 3
-        hp_acc += (lp_acc - hp_acc) >> 4
-        bp = lp_acc - hp_acc
-        if i <= 243: gate = True
-        elif i <= 975: gate = False
-        elif i <= 1219: gate = True
-        elif i <= 1951: gate = False
-        elif i <= 2195: gate = True
-        else:
-            gate = True
-            amp -= amp >> 12
-        if gate and amp >= 512:
+        # LFSR advances, count increments (signal updates)
+        new_lfsr = lfsr_next(lfsr, [15, 13, 11, 0])
+        count += 1
+        c = count
+        # Burst pattern
+        if   c < 244:  gate = True
+        elif c < 976:  gate = False
+        elif c < 1220: gate = True
+        elif c < 1952: gate = False
+        elif c < 2196: gate = True
+        else:          gate = True  # tail
+        # Noise: signed(lfsr(11:0)) - uses NEW lfsr (variable in VHDL process)
+        # Actually VHDL does: lfsr <= lfsr(14:0) & feedback THEN reads lfsr(11:0)
+        # Since lfsr is a SIGNAL, the read gets the OLD value
+        noise_12 = lfsr & 0xFFF
+        noise_raw = noise_12 - 4096 if noise_12 & 0x800 else noise_12
+        # Bandpass (signal semantics)
+        old_lp = lp_acc
+        old_hp = hp_acc
+        lp_acc = old_lp + ((noise_raw - old_lp) >> 3)
+        hp_acc = old_hp + ((old_lp - old_hp) >> 4)
+        bp = old_lp - old_hp
+        if gate:
             val = ((bp >> 4) * (amp >> 5)) >> 11
         else:
             val = 0
         out.append(clip12(val))
+        # Decay only during tail
+        if c >= 2196:
+            amp -= amp >> 12
+        lfsr = new_lfsr
     return out
 
+
 def render_rimshot(n_samples):
+    """VHDL: rimshot.vhd. 3 sines each /4 then summed, decay K=8, silence <64."""
     phases = [0, 0, 0]; incs = [610, 912, 1368]
     amp = 65535
     out = []
     for _ in range(n_samples):
-        if amp < 512:
+        if amp < 64:
             out.append(0); continue
+        # s1,s2,s3 are combinational from current phases
         s = 0
         for i in range(3):
-            s += SINE[(phases[i] >> 10) & 63]
-            phases[i] = (phases[i] + incs[i]) & 0xFFFF
-        s = s // 4
+            s += SINE[(phases[i] >> 10) & 63] >> 2
+        s = max(-2048, min(2047, s))
         val = (s * (amp >> 5)) >> 11
         out.append(clip12(val))
+        for i in range(3):
+            phases[i] = (phases[i] + incs[i]) & 0xFFFF
         amp -= amp >> 8
     return out
 
+
 def render_tom(n_samples):
-    phase = 0; freq = 226; amp = 65535; count = 0
+    """VHDL: tom.vhd G_FREQ=181. Pitch dive every sample, decay K=12, silence <64."""
+    base_freq = 181
+    phase = 0; freq = base_freq + (base_freq >> 2); amp = 65535  # 226
     out = []
     for _ in range(n_samples):
-        if amp < 512:
+        if amp < 64:
             out.append(0); continue
+        # sine_val is combinational from current phase
         s = SINE[(phase >> 10) & 63]
         val = (s * (amp >> 5)) >> 11
         out.append(clip12(val))
         phase = (phase + freq) & 0xFFFF
+        if freq > base_freq:
+            freq -= 1
         amp -= amp >> 12
-        count += 1
-        if count >= 7 and freq > 181:
-            freq -= 1; count = 0
     return out
 
-def apply_lpf(samples):
-    """Mixer LPF: lp += (input - lp) >> 2  (cutoff ~6kHz at 48828Hz)"""
+
+def apply_mixer_lpf(samples):
+    """Mixer: saturate sum to ±2048, LPF: lp+=(sat-lp)>>2, saturate output."""
     lp_state = 0
     for i in range(len(samples)):
-        diff = samples[i] - lp_state
-        lp_state = lp_state + (diff >> 2)
+        sat = max(-2048, min(2047, samples[i]))
+        diff = sat - lp_state
+        lp_state += diff >> 2
         samples[i] = max(-2048, min(2047, lp_state))
     return samples
 
+
 def save_wav(filename, samples):
-    samples = apply_lpf(samples)
+    samples = apply_mixer_lpf(samples)
     path = os.path.join(OUTDIR, filename)
     data = np.array([s * 16 for s in samples], dtype=np.int16)
     with wave.open(path, 'w') as w:
@@ -184,19 +249,19 @@ def save_wav(filename, samples):
         w.writeframes(data.tobytes())
     print(f"  {path}")
 
+
 def render_demo():
-    """120 BPM, 4 seconds, 16 steps."""
-    step_samples = SR * 60 // 120 // 4  # samples per 16th note
+    """120 BPM, 4 seconds, 16 steps. BD=0,8 SD=4,12 CH=all even OH=8 CP=10."""
+    step_samples = SR * 60 // 120 // 4
     total = SR * 4
     mix = [0] * total
-    # Pattern: BD=0,8 SD=4,12 CH=0,2,4,6,8,10,12,14 OH=8 CP=10
     pattern = {
         'kick': [0,8], 'snare': [4,12], 'ch': [0,2,4,6,8,10,12,14],
         'oh': [8], 'clap': [10]
     }
     renderers = {'kick': render_kick, 'snare': render_snare, 'ch': render_ch,
                  'oh': render_oh, 'clap': render_clap}
-    voice_len = SR  # 1 second max per hit
+    voice_len = SR
     for voice, steps in pattern.items():
         for step in steps:
             offset = step * step_samples
@@ -204,8 +269,8 @@ def render_demo():
             for i, s in enumerate(snd):
                 if offset + i < total:
                     mix[offset + i] += s
-    # Clip
-    return [clip12(s) for s in mix]
+    return mix
+
 
 def main():
     os.makedirs(OUTDIR, exist_ok=True)
