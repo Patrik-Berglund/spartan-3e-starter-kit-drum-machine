@@ -2,6 +2,8 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+-- Cowbell: 2 square waves at 540Hz and 800Hz, bandpass filtered, short decay
+
 entity cowbell is
   port (
     clk         : in  std_logic;
@@ -13,50 +15,52 @@ entity cowbell is
 end entity cowbell;
 
 architecture rtl of cowbell is
-  signal phase1    : unsigned(15 downto 0) := (others => '0');
-  signal phase2    : unsigned(15 downto 0) := (others => '0');
-  signal amplitude : unsigned(11 downto 0) := (others => '0');
-  signal active    : std_logic := '0';
+  signal p0, p1 : unsigned(19 downto 0) := (others => '0');
+  constant INC0 : unsigned(19 downto 0) := to_unsigned(11605, 20); -- 540 Hz
+  constant INC1 : unsigned(19 downto 0) := to_unsigned(17191, 20); -- 800 Hz
+  signal amp    : unsigned(13 downto 0) := (others => '0');
+  signal active : std_logic := '0';
+  signal bp_state : signed(15 downto 0) := (others => '0');
 begin
   process(clk)
-    variable sq1, sq2 : signed(11 downto 0);
-    variable mix : signed(12 downto 0);
-    variable scaled : signed(23 downto 0);
+    variable sq_sum : signed(2 downto 0);
+    variable raw    : signed(11 downto 0);
+    variable scaled : signed(25 downto 0);
   begin
     if rising_edge(clk) then
       if rst = '1' then
-        phase1 <= (others => '0');
-        phase2 <= (others => '0');
-        amplitude <= (others => '0');
-        active <= '0';
+        p0 <= (others => '0'); p1 <= (others => '0');
+        amp <= (others => '0'); active <= '0';
+        bp_state <= (others => '0');
         audio_out <= (others => '0');
       else
         if trigger = '1' then
           active <= '1';
-          phase1 <= (others => '0');
-          phase2 <= (others => '0');
-          amplitude <= to_unsigned(3500, 12);
+          amp <= to_unsigned(14000, 14);
         end if;
 
         if sample_tick = '1' and active = '1' then
-          -- Two square waves at ~587Hz and ~845Hz (non-harmonic = metallic)
-          phase1 <= phase1 + to_unsigned(2510, 16);
-          phase2 <= phase2 + to_unsigned(3614, 16);
+          p0 <= p0 + INC0;
+          p1 <= p1 + INC1;
 
-          -- Square waves
-          if phase1(15) = '1' then sq1 := to_signed(1024, 12);
-          else sq1 := to_signed(-1024, 12); end if;
-          if phase2(15) = '1' then sq2 := to_signed(1024, 12);
-          else sq2 := to_signed(-1024, 12); end if;
+          sq_sum := to_signed(0, 3);
+          if p0(19) = '1' then sq_sum := sq_sum + 1; else sq_sum := sq_sum - 1; end if;
+          if p1(19) = '1' then sq_sum := sq_sum + 1; else sq_sum := sq_sum - 1; end if;
 
-          mix := resize(sq1, 13) + resize(sq2, 13);
+          -- Scale: -2..+2 -> -1024..+1024
+          raw := resize(sq_sum, 12) * to_signed(512, 12);
+          raw := raw(11 downto 0);
 
-          scaled := mix(11 downto 0) * signed('0' & amplitude);
-          audio_out <= scaled(23 downto 12);
+          -- Bandpass
+          bp_state <= bp_state + shift_right(resize(raw, 16) - bp_state, 2);
+          raw := bp_state(15 downto 4);
 
-          -- Medium-fast decay
-          amplitude <= amplitude - ("000" & amplitude(11 downto 3));
-          if amplitude < 8 then
+          scaled := raw * signed('0' & amp(13 downto 1));
+          audio_out <= scaled(24 downto 13);
+
+          -- Fast decay ~50ms
+          amp <= amp - ("0000000000" & amp(13 downto 10));
+          if amp < 16 then
             active <= '0';
             audio_out <= (others => '0');
           end if;

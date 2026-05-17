@@ -38,8 +38,7 @@ begin
                resize(in_mt, 16) + resize(in_ht, 16) + resize(in_rs, 16) +
                resize(in_cp, 16) + resize(in_cb, 16) + resize(in_cy, 16) +
                resize(in_oh, 16) + resize(in_ch, 16);
-        -- Attenuate by /8 (11 voices, /8 gives ~1.4x headroom)
-        sum := shift_right(sum, 3);
+        -- No attenuation - saturate directly for maximum volume
         if sum > 2047 then sat := to_signed(2047, 12);
         elsif sum < -2048 then sat := to_signed(-2048, 12);
         else sat := sum(11 downto 0);

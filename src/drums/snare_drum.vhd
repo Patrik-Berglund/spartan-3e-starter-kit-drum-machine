@@ -2,6 +2,8 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+-- Snare: two bridged-T oscillators (180Hz + 330Hz) + bandpass filtered noise
+
 entity snare_drum is
   port (
     clk         : in  std_logic;
@@ -13,89 +15,93 @@ entity snare_drum is
 end entity snare_drum;
 
 architecture rtl of snare_drum is
-  -- LFSR for noise
-  signal lfsr      : std_logic_vector(15 downto 0) := x"ACE1";
-  -- Tone component (phase accumulator)
-  signal phase     : unsigned(15 downto 0) := (others => '0');
-  signal amplitude : unsigned(11 downto 0) := (others => '0');
-  signal tone_amp  : unsigned(11 downto 0) := (others => '0');
-  signal active    : std_logic := '0';
-  signal tick_cnt  : unsigned(9 downto 0) := (others => '0');
-begin
+  signal phase1   : unsigned(19 downto 0) := (others => '0');
+  signal phase2   : unsigned(19 downto 0) := (others => '0');
+  signal lfsr     : std_logic_vector(15 downto 0) := x"ACE1";
+  signal tone_amp : unsigned(13 downto 0) := (others => '0');
+  signal noise_amp: unsigned(13 downto 0) := (others => '0');
+  signal active   : std_logic := '0';
+  -- Bandpass state for noise
+  signal bp_state : signed(15 downto 0) := (others => '0');
+  signal bp_out   : signed(15 downto 0) := (others => '0');
 
+  -- 180 Hz: inc = 3866, 330 Hz: inc = 7087 @ 48828 Hz
+  constant INC1 : unsigned(19 downto 0) := to_unsigned(3866, 20);
+  constant INC2 : unsigned(19 downto 0) := to_unsigned(7087, 20);
+begin
   process(clk)
-    variable noise_val : signed(11 downto 0);
-    variable tone_val  : signed(11 downto 0);
-    variable mix       : signed(12 downto 0);
-    variable scaled    : signed(23 downto 0);
+    variable t1, t2 : signed(11 downto 0);
+    variable noise_raw : signed(11 downto 0);
+    variable tone_mix : signed(12 downto 0);
+    variable noise_filt : signed(11 downto 0);
+    variable mix : signed(12 downto 0);
+    variable scaled_t, scaled_n : signed(25 downto 0);
   begin
     if rising_edge(clk) then
       if rst = '1' then
-        phase     <= (others => '0');
-        amplitude <= (others => '0');
-        tone_amp  <= (others => '0');
-        active    <= '0';
+        phase1 <= (others => '0'); phase2 <= (others => '0');
+        lfsr <= x"ACE1";
+        tone_amp <= (others => '0'); noise_amp <= (others => '0');
+        active <= '0';
+        bp_state <= (others => '0'); bp_out <= (others => '0');
         audio_out <= (others => '0');
-        lfsr      <= x"ACE1";
-        tick_cnt  <= (others => '0');
       else
         if trigger = '1' then
-          active    <= '1';
-          amplitude <= to_unsigned(4095, 12);
-          tone_amp  <= to_unsigned(4095, 12);
-          phase     <= (others => '0');
-          tick_cnt  <= (others => '0');
+          active <= '1';
+          phase1 <= (others => '0'); phase2 <= (others => '0');
+          tone_amp  <= to_unsigned(16383, 14);
+          noise_amp <= to_unsigned(14000, 14);
         end if;
 
         if sample_tick = '1' and active = '1' then
-          -- LFSR advance (Galois, taps at 16,14,13,11)
+          phase1 <= phase1 + INC1;
+          phase2 <= phase2 + INC2;
           lfsr <= lfsr(14 downto 0) & (lfsr(15) xor lfsr(13) xor lfsr(12) xor lfsr(10));
 
-          -- Tone: ~200 Hz body
-          phase <= phase + to_unsigned(840, 16);
-
-          tick_cnt <= tick_cnt + 1;
-
-          -- Noise amplitude decay (fast)
-          if tick_cnt(2 downto 0) = "111" then
-            amplitude <= amplitude - ("000" & amplitude(11 downto 3));
+          -- Two sine-ish tones (triangle approx from phase)
+          -- Tone 1: 180 Hz
+          if phase1(19) = '0' then
+            t1 := signed('0' & phase1(18 downto 8)) - 1024;
+          else
+            t1 := 1024 - signed('0' & phase1(18 downto 8));
+          end if;
+          -- Tone 2: 330 Hz
+          if phase2(19) = '0' then
+            t2 := signed('0' & phase2(18 downto 8)) - 1024;
+          else
+            t2 := 1024 - signed('0' & phase2(18 downto 8));
           end if;
 
-          -- Tone decay (faster)
-          if tick_cnt(1 downto 0) = "11" then
-            tone_amp <= tone_amp - ("00" & tone_amp(11 downto 2));
+          -- Mix tones
+          tone_mix := resize(t1, 13) + resize(t2, 13);
+
+          -- Bandpass filter on noise (~5kHz center)
+          -- Simple 1-pole BP: bp += alpha*(input - bp)
+          -- alpha ~= 0.25 for ~5kHz at 48.8kHz
+          noise_raw := signed(lfsr(11 downto 0));
+          bp_state <= bp_state + shift_right(resize(noise_raw, 16) - bp_state, 2);
+          bp_out <= bp_state - shift_right(bp_state, 2);
+          noise_filt := bp_out(15 downto 4);
+
+          -- Apply envelopes
+          scaled_t := tone_mix(11 downto 0) * signed('0' & tone_amp(13 downto 1));
+          scaled_n := noise_filt * signed('0' & noise_amp(13 downto 1));
+
+          mix := resize(scaled_t(24 downto 13), 13) + resize(scaled_n(24 downto 13), 13);
+
+          if mix > 2047 then audio_out <= to_signed(2047, 12);
+          elsif mix < -2048 then audio_out <= to_signed(-2048, 12);
+          else audio_out <= mix(11 downto 0);
           end if;
 
-          if amplitude < 8 then
+          -- Tone decay: fast ~50ms (shift ~11)
+          tone_amp <= tone_amp - ("00000000000" & tone_amp(13 downto 11));
+          -- Noise decay: ~100ms (shift ~12)
+          noise_amp <= noise_amp - ("000000000000" & noise_amp(13 downto 12));
+
+          if tone_amp < 16 and noise_amp < 16 then
             active <= '0';
-            amplitude <= (others => '0');
-          end if;
-
-          -- Noise: LFSR top bits as signed
-          noise_val := signed(lfsr(11 downto 0));
-          -- Scale noise by amplitude
-          scaled := noise_val * signed('0' & amplitude);
-          noise_val := scaled(23 downto 12);
-
-          -- Tone: triangle from phase
-          if phase(15) = '0' then
-            tone_val := signed('0' & phase(14 downto 4)) - 1024;
-          else
-            tone_val := 1024 - signed('0' & phase(14 downto 4));
-          end if;
-          -- Scale tone
-          scaled := tone_val * signed('0' & tone_amp);
-          tone_val := scaled(23 downto 12);
-
-          -- Mix: noise dominant, tone adds body
-          mix := resize(noise_val, 13) + resize(shift_right(tone_val, 1), 13);
-          -- Saturate to 12 bits
-          if mix > 2047 then
-            audio_out <= to_signed(2047, 12);
-          elsif mix < -2048 then
-            audio_out <= to_signed(-2048, 12);
-          else
-            audio_out <= mix(11 downto 0);
+            audio_out <= (others => '0');
           end if;
         elsif active = '0' then
           audio_out <= (others => '0');
@@ -103,5 +109,4 @@ begin
       end if;
     end if;
   end process;
-
 end architecture rtl;
