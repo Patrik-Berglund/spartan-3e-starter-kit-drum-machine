@@ -35,8 +35,15 @@
 - [ ] MIDI CC: control per-voice parameters from DAW
 - [ ] Python script: .mid file → serial pattern upload
 
-## Sound Refinements
-- [ ] BD: add click transient at attack
-- [ ] SD: bandpass filter on noise component
-- [ ] CY/OH: 6-square-wave metallic model (closer to real 808)
-- [ ] Accent: velocity-sensitive trigger (louder hit)
+## Sound Refinements (IN PROGRESS)
+The voices work but don't yet match the real 808 character. Use sim_vhdl.py vs sim_ideal.py
+and the reference samples at https://audio.com/drum-machine/collections/roland-tr-808 to A/B compare.
+
+Known gaps:
+- [ ] Kick still sounds more like a sub sweep than a punchy thump (needs faster pitch sweep, shorter decay at default)
+- [ ] Cowbell sounds too "Mario" (bandpass Q needs tuning)
+- [ ] Clap noise is still harsh (bandpass too wide?)
+- [ ] Rimshot needs frequency/decay tuning against reference
+- [ ] Overall mix balance: hats too loud relative to kick
+- [ ] Consider 2× oversampling (SPI headroom available at 12.5MHz)
+- [ ] External RC filter on J5 output (10nF cap) would help significantly
