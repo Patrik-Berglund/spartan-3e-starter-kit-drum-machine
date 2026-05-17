@@ -2,7 +2,7 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
--- Rim shot: short pulse excites a resonant filter at ~500Hz. Very short decay.
+-- Rim Shot: Square wave at 455Hz, very fast decay (10ms).
 
 entity rimshot is
   port (
@@ -15,15 +15,11 @@ entity rimshot is
 end entity rimshot;
 
 architecture rtl of rimshot is
-  signal phase : unsigned(19 downto 0) := (others => '0');
-  signal amp   : unsigned(13 downto 0) := (others => '0');
+  signal phase : unsigned(15 downto 0) := (others => '0');
+  signal amp   : unsigned(11 downto 0) := (others => '0');
   signal active: std_logic := '0';
-  -- 500 Hz @ 48828 Hz: inc = 10737
-  constant FREQ : unsigned(19 downto 0) := to_unsigned(10737, 20);
 begin
   process(clk)
-    variable s : signed(11 downto 0);
-    variable scaled : signed(25 downto 0);
   begin
     if rising_edge(clk) then
       if rst = '1' then
@@ -33,25 +29,23 @@ begin
         if trigger = '1' then
           active <= '1';
           phase <= (others => '0');
-          amp <= to_unsigned(16383, 14);
+          amp <= to_unsigned(2047, 12);
         end if;
 
         if sample_tick = '1' and active = '1' then
-          phase <= phase + FREQ;
+          phase <= phase + to_unsigned(610, 16);  -- 455Hz
 
-          -- Triangle wave (sharp, metallic)
-          if phase(19) = '0' then
-            s := signed('0' & phase(18 downto 8)) - 1024;
+          -- Square wave ±amp
+          if phase(15) = '1' then
+            audio_out <= signed(resize(amp, 12));
           else
-            s := 1024 - signed('0' & phase(18 downto 8));
+            audio_out <= -signed(resize(amp, 12));
           end if;
 
-          scaled := s * signed('0' & amp(13 downto 1));
-          audio_out <= scaled(24 downto 13);
-
-          -- Very fast decay: ~5ms (shift ~8)
-          amp <= amp - ("00000000" & amp(13 downto 8));
-          if amp < 16 then
+          -- Very fast decay: 10ms = 488 samples. Subtract 4 per sample.
+          if amp > 4 then
+            amp <= amp - 4;
+          else
             active <= '0';
             audio_out <= (others => '0');
           end if;

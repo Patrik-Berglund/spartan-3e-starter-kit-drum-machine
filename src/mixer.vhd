@@ -25,14 +25,17 @@ entity mixer is
 end entity mixer;
 
 architecture rtl of mixer is
+  signal lp_state : signed(15 downto 0) := (others => '0');
 begin
   process(clk)
     variable sum : signed(15 downto 0);
     variable sat : signed(11 downto 0);
+    variable diff : signed(15 downto 0);
   begin
     if rising_edge(clk) then
       if rst = '1' then
         mix_out <= (others => '0');
+        lp_state <= (others => '0');
       elsif sample_tick = '1' then
         sum := resize(in_bd, 16) + resize(in_sd, 16) + resize(in_lt, 16) +
                resize(in_mt, 16) + resize(in_ht, 16) + resize(in_rs, 16) +
@@ -43,7 +46,20 @@ begin
         elsif sum < -2048 then sat := to_signed(-2048, 12);
         else sat := sum(11 downto 0);
         end if;
-        mix_out <= unsigned(sat + 2048);
+
+        -- Low-pass filter: smooths harsh edges
+        -- lp += (input - lp) / 2  (cutoff ~12kHz at 48.8kHz sample rate)
+        diff := resize(sat, 16) - lp_state;
+        lp_state <= lp_state + shift_right(diff, 1);
+
+        -- Output filtered signal
+        if lp_state(15 downto 12) = "0000" or lp_state(15 downto 12) = "1111" then
+          mix_out <= unsigned(lp_state(11 downto 0) + 2048);
+        elsif lp_state > 2047 then
+          mix_out <= to_unsigned(4095, 12);
+        else
+          mix_out <= to_unsigned(0, 12);
+        end if;
       end if;
     end if;
   end process;

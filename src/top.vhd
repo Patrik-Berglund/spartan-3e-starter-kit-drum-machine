@@ -108,17 +108,17 @@ begin
               trigger => trig_out(2), audio_out => audio_sd);
 
   u_lt : entity work.tom
-    generic map (G_FREQ => to_unsigned(800, 16))
+    generic map (G_FREQ => to_unsigned(221, 16))  -- 165Hz
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
               trigger => trig_out(3), audio_out => audio_lt);
 
   u_mt : entity work.tom
-    generic map (G_FREQ => to_unsigned(1200, 16))
+    generic map (G_FREQ => to_unsigned(181, 16))  -- 135Hz
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
               trigger => trig_out(4), audio_out => audio_mt);
 
   u_ht : entity work.tom
-    generic map (G_FREQ => to_unsigned(1800, 16))
+    generic map (G_FREQ => to_unsigned(295, 16))  -- 220Hz
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
               trigger => trig_out(5), audio_out => audio_ht);
 

@@ -47,3 +47,14 @@ __pycache__/
 
 # Windows Zone.Identifier files
 *:Zone.Identifier
+
+# Copyrighted reference materials (not for distribution)
+tr-808-manual.txt
+tr-808-panel.PNG
+service-manual.txt
+gemini-voices-desc.txt
+swing-type-vca.PNG
+t-network.PNG
+handclap.PNG
+voices1.PNG
+voices2.PNG
