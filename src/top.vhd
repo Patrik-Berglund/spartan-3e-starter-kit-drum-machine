@@ -70,7 +70,10 @@ architecture rtl of top is
   signal merged_trig : std_logic_vector(10 downto 0);
 
   -- Voice params from register map
-  signal bd_tone, bd_decay : unsigned(7 downto 0);
+  signal bd_tone_r, bd_decay_r : unsigned(7 downto 0);
+  signal sd_tone_r, sd_snappy_r : unsigned(7 downto 0);
+  signal lt_tuning_r, mt_tuning_r, ht_tuning_r : unsigned(7 downto 0);
+  signal cy_tone_r, cy_decay_r, oh_decay_r : unsigned(7 downto 0);
 
   -- Audio voices (12-bit signed)
   signal audio_bd, audio_sd, audio_lt, audio_mt, audio_ht : signed(11 downto 0);
@@ -108,34 +111,25 @@ begin
   reg_wr_addr <= uart_wr_addr;
   reg_wr_data <= uart_wr_data;
 
+  -- Unused read port
+  reg_rd_addr <= (others => '0');
+
   u_regmap : entity work.register_map
     port map (clk => clk_50mhz, rst => rst,
               wr_en => reg_wr_en, wr_addr => reg_wr_addr, wr_data => reg_wr_data,
               rd_addr => reg_rd_addr, rd_data => reg_rd_data,
-              triggers => reg_triggers, bpm => open, playing => open);
+              triggers => reg_triggers, bpm => open, playing => open,
+              bd_tone => bd_tone_r, bd_decay => bd_decay_r,
+              sd_tone => sd_tone_r, sd_snappy => sd_snappy_r,
+              lt_tuning => lt_tuning_r, mt_tuning => mt_tuning_r,
+              ht_tuning => ht_tuning_r,
+              cy_tone => cy_tone_r, cy_decay => cy_decay_r,
+              oh_decay => oh_decay_r);
 
   -- UART receiver
   u_uart : entity work.uart_rx
     port map (clk => clk_50mhz, rst => rst, rx => serial_rx,
               wr_en => uart_wr_en, wr_addr => uart_wr_addr, wr_data => uart_wr_data);
-
-  -- Read BD params from register map (addr 0x20=tone, 0x30=decay)
-  -- Use a simple mux to read params at startup/continuously
-  process(clk_50mhz)
-    variable rd_phase : std_logic := '0';
-  begin
-    if rising_edge(clk_50mhz) then
-      if rd_phase = '0' then
-        reg_rd_addr <= to_unsigned(32, 7);  -- 0x20 = BD tone
-        bd_tone <= reg_rd_data;
-        rd_phase := '1';
-      else
-        reg_rd_addr <= to_unsigned(48, 7);  -- 0x30 = BD decay
-        bd_decay <= reg_rd_data;
-        rd_phase := '0';
-      end if;
-    end if;
-  end process;
 
   -- Merge sequencer triggers with register map triggers (OR)
   merged_trig <= trig_out(11 downto 1) or reg_triggers;
@@ -157,27 +151,31 @@ begin
   -- Drum voices
   u_bd : entity work.kick_drum
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => merged_trig(0), tone => bd_tone, decay => bd_decay,
+              trigger => merged_trig(0), tone => bd_tone_r, decay => bd_decay_r,
               audio_out => audio_bd);
 
   u_sd : entity work.snare_drum
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => merged_trig(1), audio_out => audio_sd);
+              trigger => merged_trig(1), tone => sd_tone_r, snappy => sd_snappy_r,
+              audio_out => audio_sd);
 
   u_lt : entity work.tom
     generic map (G_FREQ => to_unsigned(221, 16))
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => merged_trig(2), audio_out => audio_lt);
+              trigger => merged_trig(2), tuning => lt_tuning_r,
+              audio_out => audio_lt);
 
   u_mt : entity work.tom
     generic map (G_FREQ => to_unsigned(181, 16))
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => merged_trig(3), audio_out => audio_mt);
+              trigger => merged_trig(3), tuning => mt_tuning_r,
+              audio_out => audio_mt);
 
   u_ht : entity work.tom
     generic map (G_FREQ => to_unsigned(295, 16))
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => merged_trig(4), audio_out => audio_ht);
+              trigger => merged_trig(4), tuning => ht_tuning_r,
+              audio_out => audio_ht);
 
   u_rs : entity work.rimshot
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
@@ -193,11 +191,13 @@ begin
 
   u_cy : entity work.cymbal
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => merged_trig(8), audio_out => audio_cy);
+              trigger => merged_trig(8), tone => cy_tone_r, decay => cy_decay_r,
+              audio_out => audio_cy);
 
   u_oh : entity work.open_hihat
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => merged_trig(9), audio_out => audio_oh);
+              trigger => merged_trig(9), decay => oh_decay_r,
+              audio_out => audio_oh);
 
   u_ch : entity work.hihat
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,

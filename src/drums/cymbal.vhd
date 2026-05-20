@@ -8,6 +8,8 @@ entity cymbal is
     rst         : in  std_logic;
     sample_tick : in  std_logic;
     trigger     : in  std_logic;
+    tone        : in  unsigned(7 downto 0);
+    decay       : in  unsigned(7 downto 0);
     audio_out   : out signed(11 downto 0)
   );
 end entity cymbal;
@@ -17,7 +19,24 @@ architecture rtl of cymbal is
   signal amp     : unsigned(15 downto 0) := (others => '0');
   signal active  : std_logic := '0';
   signal hp_acc0, hp_acc1, hp_acc2, hp_acc3 : signed(15 downto 0) := (others => '0');
+
+  -- TONE: HPF shift 2-4. tone=0->4(darker), tone=255->2(brighter)
+  signal hpf_shift : integer range 2 to 4;
+  -- DECAY: K value 11-15. decay=0->11(short), decay=255->15(long)
+  signal decay_k : integer range 11 to 15;
 begin
+  -- Map tone 0-255 to hpf_shift 4..2 (inverted: higher tone = lower shift = brighter)
+  hpf_shift <= 4 when tone < 86 else
+               3 when tone < 171 else
+               2;
+
+  -- Map decay 0-255 to K 11..15
+  decay_k <= 11 when decay < 52 else
+             12 when decay < 103 else
+             13 when decay < 154 else
+             14 when decay < 205 else
+             15;
+
   process(clk)
     variable sq : signed(3 downto 0);
     variable raw, x0, x1, x2, x3 : signed(15 downto 0);
@@ -58,21 +77,27 @@ begin
           raw := shift_left(resize(sq, 16), 7) + shift_left(resize(sq, 16), 5) +
                  shift_left(resize(sq, 16), 3) + shift_left(resize(sq, 16), 1);
 
-          -- 4-stage HPF with shift=4 (lower cutoff for more body)
-          hp_acc0 <= hp_acc0 + shift_right(raw - hp_acc0, 4);
+          -- 4-stage HPF with variable shift
+          hp_acc0 <= hp_acc0 + shift_right(raw - hp_acc0, hpf_shift);
           x0 := raw - hp_acc0;
-          hp_acc1 <= hp_acc1 + shift_right(x0 - hp_acc1, 4);
+          hp_acc1 <= hp_acc1 + shift_right(x0 - hp_acc1, hpf_shift);
           x1 := x0 - hp_acc1;
-          hp_acc2 <= hp_acc2 + shift_right(x1 - hp_acc2, 4);
+          hp_acc2 <= hp_acc2 + shift_right(x1 - hp_acc2, hpf_shift);
           x2 := x1 - hp_acc2;
-          hp_acc3 <= hp_acc3 + shift_right(x2 - hp_acc3, 4);
+          hp_acc3 <= hp_acc3 + shift_right(x2 - hp_acc3, hpf_shift);
           x3 := x2 - hp_acc3;
 
           product := x3(15 downto 4) * signed('0' & amp(15 downto 5));
           audio_out <= product(22 downto 11);
 
-          -- Exponential decay K=15 (tau ~670ms)
-          amp <= amp - ("000000000000000" & amp(15 downto 15));
+          -- Exponential decay with variable K
+          case decay_k is
+            when 11 => amp <= amp - ("00000000000" & amp(15 downto 11));
+            when 12 => amp <= amp - ("000000000000" & amp(15 downto 12));
+            when 13 => amp <= amp - ("0000000000000" & amp(15 downto 13));
+            when 14 => amp <= amp - ("00000000000000" & amp(15 downto 14));
+            when others => amp <= amp - ("000000000000000" & amp(15 downto 15));
+          end case;
 
           if amp < 512 then
             active <= '0'; audio_out <= (others => '0');

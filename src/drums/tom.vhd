@@ -11,6 +11,7 @@ entity tom is
     rst         : in  std_logic;
     sample_tick : in  std_logic;
     trigger     : in  std_logic;
+    tuning      : in  unsigned(7 downto 0);
     audio_out   : out signed(11 downto 0)
   );
 end entity tom;
@@ -20,7 +21,6 @@ architecture rtl of tom is
   signal freq  : unsigned(15 downto 0) := (others => '0');
   signal amp   : unsigned(15 downto 0) := (others => '0');
   signal active: std_logic := '0';
-  signal div   : unsigned(0 downto 0) := (others => '0');
 
   type sine_t is array(0 to 63) of signed(11 downto 0);
   constant SINE : sine_t := (
@@ -43,8 +43,17 @@ architecture rtl of tom is
   );
 
   signal sine_val : signed(11 downto 0);
+
+  -- Registered target frequency (computed continuously from tuning)
+  signal target_freq : unsigned(15 downto 0) := G_FREQ;
+  signal freq_product : unsigned(23 downto 0);
 begin
   sine_val <= SINE(to_integer(phase(15 downto 10)));
+
+  -- Compute target_freq combinationally (G_FREQ is constant, so this is just shifts/adds)
+  freq_product <= G_FREQ * tuning;
+  target_freq <= G_FREQ - ("00" & G_FREQ(15 downto 2)) +
+                 ("0" & freq_product(23 downto 9));
 
   process(clk)
     variable product : signed(23 downto 0);
@@ -52,20 +61,21 @@ begin
     if rising_edge(clk) then
       if rst = '1' then
         phase <= (others => '0'); freq <= (others => '0');
-        amp <= (others => '0'); active <= '0'; div <= "0";
+        amp <= (others => '0'); active <= '0';
         audio_out <= (others => '0');
       else
         if trigger = '1' then
           active <= '1'; phase <= (others => '0');
-          freq <= G_FREQ + ("00" & G_FREQ(15 downto 2));  -- start 25% higher
-          amp <= to_unsigned(65535, 16); div <= "0";
+          -- Start 25% higher than target
+          freq <= target_freq + ("00" & target_freq(15 downto 2));
+          amp <= to_unsigned(65535, 16);
         end if;
 
         if sample_tick = '1' and active = '1' then
           phase <= phase + freq;
 
-          -- Pitch dive to base
-          if freq > G_FREQ then freq <= freq - 1; end if;
+          -- Pitch dive to target
+          if freq > target_freq then freq <= freq - 1; end if;
 
           -- Sine * amplitude
           product := sine_val * signed('0' & amp(15 downto 5));

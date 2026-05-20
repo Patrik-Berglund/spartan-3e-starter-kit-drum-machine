@@ -34,7 +34,18 @@ entity register_map is
     triggers  : out std_logic_vector(10 downto 0);
     -- Direct outputs for commonly used params (avoid read latency)
     bpm       : out unsigned(7 downto 0);
-    playing   : out std_logic
+    playing   : out std_logic;
+    -- Direct outputs for voice parameters
+    bd_tone   : out unsigned(7 downto 0);
+    bd_decay  : out unsigned(7 downto 0);
+    sd_tone   : out unsigned(7 downto 0);
+    sd_snappy : out unsigned(7 downto 0);
+    lt_tuning : out unsigned(7 downto 0);
+    mt_tuning : out unsigned(7 downto 0);
+    ht_tuning : out unsigned(7 downto 0);
+    cy_tone   : out unsigned(7 downto 0);
+    cy_decay  : out unsigned(7 downto 0);
+    oh_decay  : out unsigned(7 downto 0)
   );
 end entity register_map;
 
@@ -103,5 +114,17 @@ begin
   triggers <= trig_reg;
   bpm <= regs(64);
   playing <= play_state;
+
+  -- Voice parameter direct outputs (zero logic cost - just wires)
+  bd_tone   <= regs(32);  -- 0x20
+  bd_decay  <= regs(48);  -- 0x30
+  sd_tone   <= regs(33);  -- 0x21
+  sd_snappy <= regs(49);  -- 0x31
+  lt_tuning <= regs(34);  -- 0x22
+  mt_tuning <= regs(35);  -- 0x23
+  ht_tuning <= regs(36);  -- 0x24
+  cy_tone   <= regs(40);  -- 0x28
+  cy_decay  <= regs(56);  -- 0x38
+  oh_decay  <= regs(57);  -- 0x39
 
 end architecture rtl;
