@@ -115,7 +115,15 @@ Key DSP techniques:
 ```bash
 source /opt/Xilinx/14.7/ISE_DS/settings64.sh
 make
-sudo xc3sprog -c xpc -p 0 build/top.bit
+
+# Step 1: Load programmer firmware (required after every power cycle)
+sudo fxload -v -t fx2 -I /opt/Xilinx/14.7/ISE_DS/common/bin/lin/xusb_xlp.hex -D /dev/bus/usb/001/002
+
+# Step 2: (WSL only) Reattach USB after re-enumeration
+# From Windows PowerShell: usbipd attach --wsl --busid <busid>
+
+# Step 3: Program
+sudo xc3sprog -v -c xpc -p 0 build/top.bit
 ```
 
 ## Simulation Scripts
