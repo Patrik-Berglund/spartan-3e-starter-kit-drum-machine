@@ -38,8 +38,8 @@ def render_kick(n_samples, tone=128, decay=128):
     # TONE: start freq inc 96 (tone=0) to 151 (tone=255)
     freq_start = 96 + ((tone * 55) >> 8)
     freq_end = 68  # ~51Hz
-    # DECAY: K value 9 (fast, decay=0) to 14 (slow, decay=255)
-    decay_k = 9 + ((decay * 5) >> 8)
+    # DECAY: K value 10 (fast, decay=0) to 14 (slow, decay=255)
+    decay_k = 10 + ((decay * 4) >> 8)
     # Pitch sweep: freq decrements by 1 every N samples
     sweep_div = 7  # every 7 samples
 
@@ -133,7 +133,7 @@ def render_mt(n_samples, tuning=128):
     return render_tom(n_samples, tuning, freq_lo=110, freq_hi=214)
 
 def render_ht(n_samples, tuning=128):
-    return render_tom(n_samples, tuning, freq_lo=228, freq_hi=295)
+    return render_tom(n_samples, tuning, freq_lo=165, freq_hi=220)
 
 
 # === CY (Cymbal) — knobs: TONE (0-255), DECAY (0-255) ===
@@ -187,7 +187,7 @@ def render_oh(n_samples, decay=128):
 # === CH (Closed HiHat) — no knobs ===
 
 def render_ch(n_samples):
-    return render_hihat_core(n_samples, 11, 3)
+    return render_hihat_core(n_samples, 9, 3)
 
 def render_hihat_core(n_samples, decay_k, hpf_shift):
     """6 free-running square oscs + 4-stage HPF."""
@@ -291,14 +291,13 @@ def render_clap(n_samples):
         new_lfsr = lfsr_next(lfsr, [15, 13, 11, 0])
         count += 1
         c = count
-        # 3 bursts: 0-195 (4ms), 586-781 (4ms), 1172-1367 (4ms), tail from 1465
+        # 3 bursts: 0-195 (4ms), 586-781 (4ms), 1172-1367 (4ms), tail from 1367
         if   c < 195:  gate = True
         elif c < 586:  gate = False
         elif c < 781:  gate = True
         elif c < 1172: gate = False
         elif c < 1367: gate = True
-        elif c < 1465: gate = False
-        else:          gate = True  # tail
+        else:          gate = True  # tail starts immediately after last burst
         noise_12 = lfsr & 0xFFF
         noise_raw = noise_12 - 4096 if noise_12 & 0x800 else noise_12
         old_lp = lp_acc
@@ -311,7 +310,7 @@ def render_clap(n_samples):
         else:
             val = 0
         out.append(val)
-        if c >= 1465:
+        if c >= 1367:
             amp -= amp >> 11  # tail decay K=11
         lfsr = new_lfsr
     return out
