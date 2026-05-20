@@ -7,11 +7,8 @@ import numpy as np
 SR = 48828
 OUTDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output_vhdl")
 
-SINE = [0,201,399,594,783,965,1137,1299,1447,1582,1702,1805,1891,1959,2008,2037,
-        2047,2037,2008,1959,1891,1805,1702,1582,1447,1299,1137,965,783,594,399,201,
-        0,-201,-399,-594,-783,-965,-1137,-1299,-1447,-1582,-1702,-1805,-1891,-1959,
-        -2008,-2037,-2047,-2037,-2008,-1959,-1891,-1805,-1702,-1582,-1447,-1299,
-        -1137,-965,-783,-594,-399,-201]
+# 256-entry sine table, 12-bit signed (matches FPGA distributed RAM)
+SINE = [int(round(2047 * np.sin(2 * np.pi * i / 256))) for i in range(256)]
 
 def lfsr_next(reg, taps):
     fb = 0
@@ -24,6 +21,21 @@ def clip12(x):
     if x < -2048: return -2048
     return x
 
+def sine_lookup(phase):
+    """256-entry 12-bit table with linear interpolation. Uses 1 MULT18x18.
+    Index from bits 15:8, fraction from bits 7:0."""
+    idx = (phase >> 8) & 255
+    frac = phase & 255
+    s0 = SINE[idx]
+    s1 = SINE[(idx + 1) & 255]
+    return s0 + ((s1 - s0) * frac >> 8)
+
+def amp_multiply(sine_val, amp):
+    """Full 18x18 multiply: sine(12-bit signed) * amp(16-bit unsigned).
+    Returns 18-bit signed result (matches MULT18x18 output precision)."""
+    product = sine_val * amp  # 28-bit
+    return product >> 10  # keep top 18 bits
+
 
 def render_kick(n_samples):
     """VHDL: kick_drum.vhd. Sine sweep 150→75, decay K=12, silence <64."""
@@ -32,11 +44,9 @@ def render_kick(n_samples):
     for _ in range(n_samples):
         if amp < 64:
             out.append(0); continue
-        # sine_val uses current phase (combinational in VHDL)
-        s = SINE[(phase >> 10) & 63]
-        val = (s * (amp >> 5)) >> 11
-        out.append(clip12(val))
-        # Signal updates (all use old values, take effect simultaneously)
+        s = sine_lookup(phase)
+        val = amp_multiply(s, amp)
+        out.append(val)
         new_phase = (phase + freq) & 0xFFFF
         new_div = (div + 1) & 7
         new_freq = freq
@@ -56,24 +66,21 @@ def render_snare(n_samples):
     for _ in range(n_samples):
         if tone_amp < 64 and noise_amp < 64:
             out.append(0); continue
-        # s1, s2 are combinational from current phase
-        s1 = SINE[(phase1 >> 10) & 63]
-        s2 = SINE[(phase2 >> 10) & 63]
+        s1 = sine_lookup(phase1)
+        s2 = sine_lookup(phase2)
         # LFSR feedback: bit15^bit13^bit12^bit10
         new_lfsr = lfsr_next(lfsr, [15, 13, 12, 10])
         # Tones
-        amp_s = tone_amp >> 5
-        p1 = s1 * amp_s
-        p2 = s2 * amp_s
+        p1 = s1 * tone_amp
+        p2 = s2 * tone_amp
         # Noise: sign from lfsr(15) (OLD lfsr, before update)
-        n_s = noise_amp >> 5
-        noise = n_s if (lfsr >> 15) & 1 else -n_s
-        # Mix: p1(22:12) + shift_right(p2(22:11),1) + shift_right(noise,1)
-        t1 = p1 >> 12
-        t2 = (p2 >> 11) >> 1
-        t3 = noise >> 1
+        noise = noise_amp if (lfsr >> 15) & 1 else -noise_amp
+        # Mix to 18-bit: divide total by 3 to stay in range
+        t1 = p1 >> 12       # 28-bit >> 12 = 16-bit
+        t2 = p2 >> 13       # half of t1
+        t3 = noise >> 1     # 16-bit >> 1 = 15-bit
         mix = t1 + t2 + t3
-        out.append(clip12(mix))
+        out.append(mix)
         # Updates
         phase1 = (phase1 + 319) & 0xFFFF
         phase2 = (phase2 + 638) & 0xFFFF
@@ -109,9 +116,9 @@ def render_hihat_core(n_samples, decay_k, hpf_shift):
             new_accs[j] = old_acc + ((hp - old_acc) >> hpf_shift)
             hp = hp - old_acc
         hp_accs = new_accs
-        # Output: hp(15:4) * signed('0' & amp(15:5)) >> product(22:11)
-        val = ((hp >> 4) * (amp >> 5)) >> 11
-        out.append(clip12(val))
+        # Output: full 18-bit multiply
+        val = (hp * amp) >> 10
+        out.append(val)
         amp -= amp >> decay_k
     return out
 
@@ -142,8 +149,8 @@ def render_cowbell(n_samples):
         lp_acc = old_lp + ((raw - old_lp) >> 2)
         hp_acc = old_hp + ((old_lp - old_hp) >> 4)
         bp = old_lp - old_hp
-        val = ((bp >> 4) * (amp >> 5)) >> 11
-        out.append(clip12(val))
+        val = (bp * amp) >> 10
+        out.append(val)
         amp -= amp >> 11
     return out
 
@@ -178,10 +185,10 @@ def render_clap(n_samples):
         hp_acc = old_hp + ((old_lp - old_hp) >> 4)
         bp = old_lp - old_hp
         if gate:
-            val = ((bp >> 4) * (amp >> 5)) >> 11
+            val = (bp * amp) >> 10
         else:
             val = 0
-        out.append(clip12(val))
+        out.append(val)
         # Decay only during tail
         if c >= 2196:
             amp -= amp >> 12
@@ -197,13 +204,12 @@ def render_rimshot(n_samples):
     for _ in range(n_samples):
         if amp < 64:
             out.append(0); continue
-        # s1,s2,s3 are combinational from current phases
         s = 0
         for i in range(3):
-            s += SINE[(phases[i] >> 10) & 63] >> 2
+            s += sine_lookup(phases[i]) >> 2
         s = max(-2048, min(2047, s))
-        val = (s * (amp >> 5)) >> 11
-        out.append(clip12(val))
+        val = amp_multiply(s, amp)
+        out.append(val)
         for i in range(3):
             phases[i] = (phases[i] + incs[i]) & 0xFFFF
         amp -= amp >> 8
@@ -218,10 +224,9 @@ def render_tom(n_samples):
     for _ in range(n_samples):
         if amp < 64:
             out.append(0); continue
-        # sine_val is combinational from current phase
-        s = SINE[(phase >> 10) & 63]
-        val = (s * (amp >> 5)) >> 11
-        out.append(clip12(val))
+        s = sine_lookup(phase)
+        val = amp_multiply(s, amp)
+        out.append(val)
         phase = (phase + freq) & 0xFFFF
         if freq > base_freq:
             freq -= 1
@@ -230,13 +235,9 @@ def render_tom(n_samples):
 
 
 def apply_mixer_lpf(samples):
-    """Mixer: saturate sum to ±2048, LPF: lp+=(sat-lp)>>2, saturate output."""
-    lp_state = 0
+    """Final DAC output: truncate 18-bit to 12-bit. No LPF on sine voices."""
     for i in range(len(samples)):
-        sat = max(-2048, min(2047, samples[i]))
-        diff = sat - lp_state
-        lp_state += diff >> 2
-        samples[i] = max(-2048, min(2047, lp_state))
+        samples[i] = max(-2048, min(2047, samples[i] >> 6))
     return samples
 
 
