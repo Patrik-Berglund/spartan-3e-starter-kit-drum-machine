@@ -98,20 +98,20 @@ def square_osc_mix(n_samples, freqs):
     return sig
 
 def render_ch(n_samples):
-    """CH: 6 square oscillators + HPF. Measured: decay=34ms, centroid=11.5kHz."""
+    """CH: 6 square oscillators + BPF. Measured: decay=34ms, centroid=11.5kHz."""
     freqs = [204.7, 304.4, 369.6, 522.7, 540.4, 800.6]
     t = np.arange(n_samples) / SR
     sig = square_osc_mix(n_samples, freqs)
-    sig = hpf(sig, 6000)
+    sig = bpf(sig, 6000, 10000)
     return sig * np.exp(-t / 0.015)  # tau=15ms gives -20dB at ~34ms
 
 def render_oh(n_samples, decay=5.0):
-    """OH: Same 6 oscillators + HPF, longer decay.
+    """OH: Same 6 oscillators + BPF, longer decay.
     decay: 0-10, controls decay time (74-448ms measured)."""
     freqs = [204.7, 304.4, 369.6, 522.7, 540.4, 800.6]
     t = np.arange(n_samples) / SR
     sig = square_osc_mix(n_samples, freqs)
-    sig = hpf(sig, 6000)
+    sig = bpf(sig, 6000, 10000)
     # Decay: 74ms (knob=0) to 448ms (knob=10)
     tau_table = {0: 0.032, 2.5: 0.077, 5.0: 0.200, 7.5: 0.250, 10.0: 0.280}
     knobs = sorted(tau_table.keys())
@@ -120,38 +120,58 @@ def render_oh(n_samples, decay=5.0):
     return sig * np.exp(-t / tau)
 
 def render_cymbal(n_samples, tone=5.0, decay=5.0):
-    """CY: 6 square oscillators + HPF. 25 refs (TONE x DECAY)."""
+    """CY: 6 square oscillators split into 3 frequency bands with different decays.
+    Service manual: 3 VCAs (Q16, Q17, Q18) for high/mid/low bands.
+    High band decays fastest, low band sustains longest.
+    Reference shows centroid drifting from 10kHz down to 5kHz over 1s."""
     freqs = [204.7, 304.4, 369.6, 522.7, 540.4, 800.6]
     t = np.arange(n_samples) / SR
     sig = square_osc_mix(n_samples, freqs)
-    # TONE controls HPF cutoff
-    hpf_freq = 4000 + (tone / 10.0) * 4000  # 4kHz to 8kHz
-    sig = hpf(sig, hpf_freq)
-    # DECAY: long, ~500ms to 2s
-    tau = 0.200 + (decay / 10.0) * 0.600
-    return sig * np.exp(-t / tau)
+    # Split into 3 bands like the real circuit
+    hi = hpf(sig, 10000)       # Q16: highest, shortest decay
+    mid = bpf(sig, 5000, 10000) # Q17: mid, controllable decay
+    lo = bpf(sig, 2000, 5000)   # Q18: lowest, longest decay
+    # Decay times: hi=fast, mid=medium (DECAY knob), lo=slow
+    # Service manual: CY decay 350/800/1200ms at short/mid/long
+    base_tau = 0.060 + (decay / 10.0) * 0.200  # 60-260ms base
+    hi_decay = base_tau * 0.3   # high dies fast
+    mid_decay = base_tau * 0.7  # mid is the main body
+    lo_decay = base_tau * 1.5   # low sustains
+    out = hi * np.exp(-t / hi_decay) + mid * np.exp(-t / mid_decay) + lo * np.exp(-t / lo_decay)
+    return out
 
 def render_cowbell(n_samples):
-    """CB: 2 square oscillators + BPF. Measured: freq=822Hz, decay=42ms, centroid=2285Hz."""
+    """CB: 2 square oscillators + high-Q BPF. Measured: freq=822Hz, decay=42ms.
+    Service manual: two Schmitt oscillators (540/800Hz) through IC2 bandpass.
+    The 'ring' character comes from the high-Q resonance at ~800Hz."""
     t = np.arange(n_samples) / SR
     sig = np.sign(np.sin(2*np.pi*540*t)) + np.sign(np.sin(2*np.pi*800*t))
-    sig = bpf(sig, 500, 1500)
-    return sig * np.exp(-t / 0.030)  # tau=30ms gives -20dB at ~42ms
+    sig = bpf(sig, 700, 900)  # narrow BPF = high Q resonance
+    return sig * np.exp(-t / 0.018)
 
 def render_clap(n_samples):
-    """CP: Noise bursts + BPF. Measured: decay=29ms, centroid=4890Hz."""
+    """CP: Noise bursts + BPF. Service manual Fig 13: sawtooth envelope generator.
+    3 bursts with ~10ms gaps, then reverb tail. Total ~80ms active."""
     t = np.arange(n_samples) / SR
     noise = np.random.randn(n_samples)
     noise_filt = bpf(noise, 1000, 8000)
-    # Envelope: rapid attack then exponential decay with slight re-triggers
-    # Simpler model: just shaped decay that matches 29ms -20dB
-    env = np.exp(-t / 0.018)
-    # Add 3 short re-trigger bumps in first 10ms
-    for bump_ms in [2, 5, 8]:
-        idx = int(bump_ms * SR / 1000)
-        bump_len = int(0.002 * SR)
-        if idx + bump_len < n_samples:
-            env[idx:idx+bump_len] = np.maximum(env[idx:idx+bump_len], 0.8)
+    # Envelope: 3 bursts then sustained reverb tail
+    # Burst 1: 0-4ms, Burst 2: 12-16ms, Burst 3: 24-28ms, Tail: 30ms+
+    env = np.zeros(n_samples)
+    burst_times_ms = [0, 12, 24]  # burst start times
+    burst_dur_ms = 4
+    for bt in burst_times_ms:
+        start = int(bt * SR / 1000)
+        dur = int(burst_dur_ms * SR / 1000)
+        end = min(start + dur, n_samples)
+        burst_t = np.arange(end - start) / SR
+        env[start:end] = np.exp(-burst_t / 0.002)  # each burst decays fast
+    # Reverb tail starts at ~30ms, decays over ~50ms
+    tail_start = int(30 * SR / 1000)
+    if tail_start < n_samples:
+        tail_t = np.arange(n_samples - tail_start) / SR
+        tail = 0.7 * np.exp(-tail_t / 0.020)
+        env[tail_start:] = np.maximum(env[tail_start:], tail)
     return noise_filt * env
 
 def render_rimshot(n_samples):
