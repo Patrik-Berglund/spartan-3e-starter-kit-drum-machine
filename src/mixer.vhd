@@ -53,23 +53,14 @@ begin
                        (resize(sum_c, 16) + resize(sum_d, 16));
           pipe <= "010";
         elsif pipe = "010" then
-          -- Stage 3: saturate + LPF + output
+          -- Stage 3: saturate + output (no LPF)
           -- Attenuate >>2
           if sum_total > 8191 then sat := to_signed(2047, 12);
           elsif sum_total < -8192 then sat := to_signed(-2048, 12);
           else sat := sum_total(13 downto 2);
           end if;
 
-          diff := resize(sat, 16) - lp_state;
-          lp_state <= lp_state + shift_right(diff, 2);
-
-          if lp_state > 2047 then
-            mix_out <= to_unsigned(4095, 12);
-          elsif lp_state < -2048 then
-            mix_out <= to_unsigned(0, 12);
-          else
-            mix_out <= unsigned(lp_state(11 downto 0) + 2048);
-          end if;
+          mix_out <= unsigned(sat + 2048);
           pipe <= "000";
         end if;
       end if;
