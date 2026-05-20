@@ -89,12 +89,11 @@ def render_snare(n_samples, tone=5.0, snappy=5.0):
     return tone_sig + hpf_out * noise_gain * 0.8
 
 def square_osc_mix(n_samples, freqs):
-    """6 free-running square oscillators with random start phases."""
+    """6 free-running square oscillators - fixed phases for consistent beating."""
     sig = np.zeros(n_samples)
     t = np.arange(n_samples) / SR
-    for f in freqs:
-        ph = np.random.uniform(0, 1)
-        sig += np.sign(np.sin(2*np.pi*f*t + 2*np.pi*ph))
+    for i, f in enumerate(freqs):
+        sig += np.sign(np.sin(2*np.pi*f*t))
     return sig
 
 def render_ch(n_samples):
@@ -137,7 +136,7 @@ def render_cymbal(n_samples, tone=5.0, decay=5.0):
     hi_decay = base_tau * 0.3   # high dies fast
     mid_decay = base_tau * 0.7  # mid is the main body
     lo_decay = base_tau * 1.5   # low sustains
-    out = hi * np.exp(-t / hi_decay) + mid * np.exp(-t / mid_decay) + lo * np.exp(-t / lo_decay)
+    out = hi * 1.2 * np.exp(-t / hi_decay) + mid * 1.0 * np.exp(-t / mid_decay) + lo * 0.3 * np.exp(-t / lo_decay)
     return out
 
 def render_cowbell(n_samples):

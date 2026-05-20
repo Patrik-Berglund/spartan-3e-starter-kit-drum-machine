@@ -61,3 +61,6 @@ NET "lcd_db<3>"  LOC = "M15" | IOSTANDARD = LVTTL | DRIVE = 4 | SLEW = SLOW ;
 NET "lcd_db<2>"  LOC = "P17" | IOSTANDARD = LVTTL | DRIVE = 4 | SLEW = SLOW ;
 NET "lcd_db<1>"  LOC = "R16" | IOSTANDARD = LVTTL | DRIVE = 4 | SLEW = SLOW ;
 NET "lcd_db<0>"  LOC = "R15" | IOSTANDARD = LVTTL | DRIVE = 4 | SLEW = SLOW ;
+
+# RS-232 Serial RX (DCE RxD)
+NET "serial_rx" LOC = "R7" | IOSTANDARD = LVTTL ;

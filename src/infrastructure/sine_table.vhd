@@ -1,7 +1,3 @@
--- Shared sine table with linear interpolation
--- 256 x 12-bit entries, one MULT18x18 for interpolation
--- TDM: accepts phase input, returns interpolated sine value in 2 clock cycles
-
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -16,111 +12,78 @@ end entity sine_table;
 
 architecture rtl of sine_table is
   type sine_rom_t is array(0 to 255) of signed(11 downto 0);
-
-  -- Generate sine table at elaboration
-  function init_sine return sine_rom_t is
-    variable tbl : sine_rom_t;
-    variable angle : real;
-  begin
-    for i in 0 to 255 loop
-      angle := real(i) * 6.283185307 / 256.0;
-      tbl(i) := to_signed(integer(2047.0 * sin(angle)), 12);
-    end loop;
-    return tbl;
-  end function;
-
-  -- Use MATH_REAL for init
   constant SINE_ROM : sine_rom_t := (
-    to_signed(0,12),to_signed(50,12),to_signed(100,12),to_signed(150,12),
-    to_signed(200,12),to_signed(249,12),to_signed(297,12),to_signed(345,12),
-    to_signed(392,12),to_signed(437,12),to_signed(482,12),to_signed(526,12),
-    to_signed(568,12),to_signed(609,12),to_signed(649,12),to_signed(687,12),
-    to_signed(724,12),to_signed(758,12),to_signed(791,12),to_signed(822,12),
-    to_signed(851,12),to_signed(878,12),to_signed(903,12),to_signed(926,12),
-    to_signed(946,12),to_signed(964,12),to_signed(980,12),to_signed(993,12),
-    to_signed(1004,12),to_signed(1013,12),to_signed(1019,12),to_signed(1023,12),
-    to_signed(1024,12),to_signed(1023,12),to_signed(1019,12),to_signed(1013,12),
-    to_signed(1004,12),to_signed(993,12),to_signed(980,12),to_signed(964,12),
-    to_signed(946,12),to_signed(926,12),to_signed(903,12),to_signed(878,12),
-    to_signed(851,12),to_signed(822,12),to_signed(791,12),to_signed(758,12),
-    to_signed(724,12),to_signed(687,12),to_signed(649,12),to_signed(609,12),
-    to_signed(568,12),to_signed(526,12),to_signed(482,12),to_signed(437,12),
-    to_signed(392,12),to_signed(345,12),to_signed(297,12),to_signed(249,12),
-    to_signed(200,12),to_signed(150,12),to_signed(100,12),to_signed(50,12),
-    to_signed(0,12),to_signed(-50,12),to_signed(-100,12),to_signed(-150,12),
-    to_signed(-200,12),to_signed(-249,12),to_signed(-297,12),to_signed(-345,12),
-    to_signed(-392,12),to_signed(-437,12),to_signed(-482,12),to_signed(-526,12),
-    to_signed(-568,12),to_signed(-609,12),to_signed(-649,12),to_signed(-687,12),
-    to_signed(-724,12),to_signed(-758,12),to_signed(-791,12),to_signed(-822,12),
-    to_signed(-851,12),to_signed(-878,12),to_signed(-903,12),to_signed(-926,12),
-    to_signed(-946,12),to_signed(-964,12),to_signed(-980,12),to_signed(-993,12),
-    to_signed(-1004,12),to_signed(-1013,12),to_signed(-1019,12),to_signed(-1023,12),
-    to_signed(-1024,12),to_signed(-1023,12),to_signed(-1019,12),to_signed(-1013,12),
-    to_signed(-1004,12),to_signed(-993,12),to_signed(-980,12),to_signed(-964,12),
-    to_signed(-946,12),to_signed(-926,12),to_signed(-903,12),to_signed(-878,12),
-    to_signed(-851,12),to_signed(-822,12),to_signed(-791,12),to_signed(-758,12),
-    to_signed(-724,12),to_signed(-687,12),to_signed(-649,12),to_signed(-609,12),
-    to_signed(-568,12),to_signed(-526,12),to_signed(-482,12),to_signed(-437,12),
-    to_signed(-392,12),to_signed(-345,12),to_signed(-297,12),to_signed(-249,12),
-    to_signed(-200,12),to_signed(-150,12),to_signed(-100,12),to_signed(-50,12),
-    -- Second half (128-255): repeat with proper values
-    to_signed(0,12),to_signed(50,12),to_signed(100,12),to_signed(150,12),
-    to_signed(200,12),to_signed(249,12),to_signed(297,12),to_signed(345,12),
-    to_signed(392,12),to_signed(437,12),to_signed(482,12),to_signed(526,12),
-    to_signed(568,12),to_signed(609,12),to_signed(649,12),to_signed(687,12),
-    to_signed(724,12),to_signed(758,12),to_signed(791,12),to_signed(822,12),
-    to_signed(851,12),to_signed(878,12),to_signed(903,12),to_signed(926,12),
-    to_signed(946,12),to_signed(964,12),to_signed(980,12),to_signed(993,12),
-    to_signed(1004,12),to_signed(1013,12),to_signed(1019,12),to_signed(1023,12),
-    to_signed(1024,12),to_signed(1023,12),to_signed(1019,12),to_signed(1013,12),
-    to_signed(1004,12),to_signed(993,12),to_signed(980,12),to_signed(964,12),
-    to_signed(946,12),to_signed(926,12),to_signed(903,12),to_signed(878,12),
-    to_signed(851,12),to_signed(822,12),to_signed(791,12),to_signed(758,12),
-    to_signed(724,12),to_signed(687,12),to_signed(649,12),to_signed(609,12),
-    to_signed(568,12),to_signed(526,12),to_signed(482,12),to_signed(437,12),
-    to_signed(392,12),to_signed(345,12),to_signed(297,12),to_signed(249,12),
-    to_signed(200,12),to_signed(150,12),to_signed(100,12),to_signed(50,12),
-    to_signed(0,12),to_signed(-50,12),to_signed(-100,12),to_signed(-150,12),
-    to_signed(-200,12),to_signed(-249,12),to_signed(-297,12),to_signed(-345,12),
-    to_signed(-392,12),to_signed(-437,12),to_signed(-482,12),to_signed(-526,12),
-    to_signed(-568,12),to_signed(-609,12),to_signed(-649,12),to_signed(-687,12),
-    to_signed(-724,12),to_signed(-758,12),to_signed(-791,12),to_signed(-822,12),
-    to_signed(-851,12),to_signed(-878,12),to_signed(-903,12),to_signed(-926,12),
-    to_signed(-946,12),to_signed(-964,12),to_signed(-980,12),to_signed(-993,12),
-    to_signed(-1004,12),to_signed(-1013,12),to_signed(-1019,12),to_signed(-1023,12),
-    to_signed(-1024,12),to_signed(-1023,12),to_signed(-1019,12),to_signed(-1013,12),
-    to_signed(-1004,12),to_signed(-993,12),to_signed(-980,12),to_signed(-964,12),
-    to_signed(-946,12),to_signed(-926,12),to_signed(-903,12),to_signed(-878,12),
-    to_signed(-851,12),to_signed(-822,12),to_signed(-791,12),to_signed(-758,12),
-    to_signed(-724,12),to_signed(-687,12),to_signed(-649,12),to_signed(-609,12),
-    to_signed(-568,12),to_signed(-526,12),to_signed(-482,12),to_signed(-437,12),
-    to_signed(-392,12),to_signed(-345,12),to_signed(-297,12),to_signed(-249,12),
-    to_signed(-200,12),to_signed(-150,12),to_signed(-100,12),to_signed(-50,12)
+    to_signed(0,12),to_signed(50,12),to_signed(100,12),to_signed(151,12),to_signed(201,12),to_signed(251,12),to_signed(300,12),to_signed(350,12),
+    to_signed(399,12),to_signed(449,12),to_signed(497,12),to_signed(546,12),to_signed(594,12),to_signed(642,12),to_signed(690,12),to_signed(737,12),
+    to_signed(783,12),to_signed(830,12),to_signed(875,12),to_signed(920,12),to_signed(965,12),to_signed(1009,12),to_signed(1052,12),to_signed(1095,12),
+    to_signed(1137,12),to_signed(1179,12),to_signed(1219,12),to_signed(1259,12),to_signed(1299,12),to_signed(1337,12),to_signed(1375,12),to_signed(1411,12),
+    to_signed(1447,12),to_signed(1483,12),to_signed(1517,12),to_signed(1550,12),to_signed(1582,12),to_signed(1614,12),to_signed(1644,12),to_signed(1674,12),
+    to_signed(1702,12),to_signed(1729,12),to_signed(1756,12),to_signed(1781,12),to_signed(1805,12),to_signed(1828,12),to_signed(1850,12),to_signed(1871,12),
+    to_signed(1891,12),to_signed(1910,12),to_signed(1927,12),to_signed(1944,12),to_signed(1959,12),to_signed(1973,12),to_signed(1986,12),to_signed(1997,12),
+    to_signed(2008,12),to_signed(2017,12),to_signed(2025,12),to_signed(2032,12),to_signed(2037,12),to_signed(2041,12),to_signed(2045,12),to_signed(2046,12),
+    to_signed(2047,12),to_signed(2046,12),to_signed(2045,12),to_signed(2041,12),to_signed(2037,12),to_signed(2032,12),to_signed(2025,12),to_signed(2017,12),
+    to_signed(2008,12),to_signed(1997,12),to_signed(1986,12),to_signed(1973,12),to_signed(1959,12),to_signed(1944,12),to_signed(1927,12),to_signed(1910,12),
+    to_signed(1891,12),to_signed(1871,12),to_signed(1850,12),to_signed(1828,12),to_signed(1805,12),to_signed(1781,12),to_signed(1756,12),to_signed(1729,12),
+    to_signed(1702,12),to_signed(1674,12),to_signed(1644,12),to_signed(1614,12),to_signed(1582,12),to_signed(1550,12),to_signed(1517,12),to_signed(1483,12),
+    to_signed(1447,12),to_signed(1411,12),to_signed(1375,12),to_signed(1337,12),to_signed(1299,12),to_signed(1259,12),to_signed(1219,12),to_signed(1179,12),
+    to_signed(1137,12),to_signed(1095,12),to_signed(1052,12),to_signed(1009,12),to_signed(965,12),to_signed(920,12),to_signed(875,12),to_signed(830,12),
+    to_signed(783,12),to_signed(737,12),to_signed(690,12),to_signed(642,12),to_signed(594,12),to_signed(546,12),to_signed(497,12),to_signed(449,12),
+    to_signed(399,12),to_signed(350,12),to_signed(300,12),to_signed(251,12),to_signed(201,12),to_signed(151,12),to_signed(100,12),to_signed(50,12),
+    to_signed(0,12),to_signed(-50,12),to_signed(-100,12),to_signed(-151,12),to_signed(-201,12),to_signed(-251,12),to_signed(-300,12),to_signed(-350,12),
+    to_signed(-399,12),to_signed(-449,12),to_signed(-497,12),to_signed(-546,12),to_signed(-594,12),to_signed(-642,12),to_signed(-690,12),to_signed(-737,12),
+    to_signed(-783,12),to_signed(-830,12),to_signed(-875,12),to_signed(-920,12),to_signed(-965,12),to_signed(-1009,12),to_signed(-1052,12),to_signed(-1095,12),
+    to_signed(-1137,12),to_signed(-1179,12),to_signed(-1219,12),to_signed(-1259,12),to_signed(-1299,12),to_signed(-1337,12),to_signed(-1375,12),to_signed(-1411,12),
+    to_signed(-1447,12),to_signed(-1483,12),to_signed(-1517,12),to_signed(-1550,12),to_signed(-1582,12),to_signed(-1614,12),to_signed(-1644,12),to_signed(-1674,12),
+    to_signed(-1702,12),to_signed(-1729,12),to_signed(-1756,12),to_signed(-1781,12),to_signed(-1805,12),to_signed(-1828,12),to_signed(-1850,12),to_signed(-1871,12),
+    to_signed(-1891,12),to_signed(-1910,12),to_signed(-1927,12),to_signed(-1944,12),to_signed(-1959,12),to_signed(-1973,12),to_signed(-1986,12),to_signed(-1997,12),
+    to_signed(-2008,12),to_signed(-2017,12),to_signed(-2025,12),to_signed(-2032,12),to_signed(-2037,12),to_signed(-2041,12),to_signed(-2045,12),to_signed(-2046,12),
+    to_signed(-2047,12),to_signed(-2046,12),to_signed(-2045,12),to_signed(-2041,12),to_signed(-2037,12),to_signed(-2032,12),to_signed(-2025,12),to_signed(-2017,12),
+    to_signed(-2008,12),to_signed(-1997,12),to_signed(-1986,12),to_signed(-1973,12),to_signed(-1959,12),to_signed(-1944,12),to_signed(-1927,12),to_signed(-1910,12),
+    to_signed(-1891,12),to_signed(-1871,12),to_signed(-1850,12),to_signed(-1828,12),to_signed(-1805,12),to_signed(-1781,12),to_signed(-1756,12),to_signed(-1729,12),
+    to_signed(-1702,12),to_signed(-1674,12),to_signed(-1644,12),to_signed(-1614,12),to_signed(-1582,12),to_signed(-1550,12),to_signed(-1517,12),to_signed(-1483,12),
+    to_signed(-1447,12),to_signed(-1411,12),to_signed(-1375,12),to_signed(-1337,12),to_signed(-1299,12),to_signed(-1259,12),to_signed(-1219,12),to_signed(-1179,12),
+    to_signed(-1137,12),to_signed(-1095,12),to_signed(-1052,12),to_signed(-1009,12),to_signed(-965,12),to_signed(-920,12),to_signed(-875,12),to_signed(-830,12),
+    to_signed(-783,12),to_signed(-737,12),to_signed(-690,12),to_signed(-642,12),to_signed(-594,12),to_signed(-546,12),to_signed(-497,12),to_signed(-449,12),
+    to_signed(-399,12),to_signed(-350,12),to_signed(-300,12),to_signed(-251,12),to_signed(-201,12),to_signed(-151,12),to_signed(-100,12),to_signed(-50,12)
   );
 
-  signal idx     : unsigned(7 downto 0);
-  signal frac    : unsigned(7 downto 0);
-  signal s0, s1  : signed(11 downto 0);
-  signal diff    : signed(11 downto 0);
-  signal interp  : signed(19 downto 0);  -- diff * frac (12 * 8 = 20 bit)
+  -- Pipeline stage 1 registers
+  signal s0_r, s1_r : signed(11 downto 0);
+  signal frac_r     : unsigned(7 downto 0);
+
+  -- Pipeline stage 2 register
+  signal out_r : signed(11 downto 0);
+
+  -- Interpolation wires
+  signal diff   : signed(12 downto 0);
+  signal interp : signed(21 downto 0);  -- 13-bit * 9-bit = 22-bit
 begin
 
-  -- Pipeline stage 1: table lookup
-  idx  <= phase(15 downto 8);
-  frac <= phase(7 downto 0);
+  -- Stage 1: ROM lookup (registered)
+  process(clk)
+    variable idx : unsigned(7 downto 0);
+    variable nxt : unsigned(7 downto 0);
+  begin
+    if rising_edge(clk) then
+      idx := phase(15 downto 8);
+      nxt := idx + 1;
+      s0_r   <= SINE_ROM(to_integer(idx));
+      s1_r   <= SINE_ROM(to_integer(nxt));
+      frac_r <= phase(7 downto 0);
+    end if;
+  end process;
+
+  -- Stage 2: linear interpolation (1 MULT18x18)
+  diff   <= resize(s1_r, 13) - resize(s0_r, 13);
+  interp <= diff * signed("0" & frac_r);  -- 13 * 9 = 22 bits
 
   process(clk)
   begin
     if rising_edge(clk) then
-      s0 <= SINE_ROM(to_integer(idx));
-      s1 <= SINE_ROM(to_integer(idx + 1));
+      out_r <= s0_r + interp(19 downto 8);
     end if;
   end process;
 
-  -- Pipeline stage 2: interpolation (uses 1 MULT18x18)
-  diff <= s1 - s0;
-  interp <= diff * signed("0" & frac);  -- 12-bit * 9-bit = 20-bit
-
-  sine_out <= s0 + interp(19 downto 8);  -- s0 + (diff * frac >> 8)
+  sine_out <= out_r;
 
 end architecture rtl;

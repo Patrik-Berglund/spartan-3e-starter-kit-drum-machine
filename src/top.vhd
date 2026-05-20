@@ -6,6 +6,7 @@ entity top is
   port (
     clk_50mhz   : in  std_logic;
     btn_south    : in  std_logic;
+    serial_rx    : in  std_logic;
     ps2_clk      : in  std_logic;
     ps2_data     : in  std_logic;
     vga_red      : out std_logic;
@@ -52,6 +53,25 @@ architecture rtl of top is
   signal accent_flag : std_logic;
   signal pattern_flat : std_logic_vector(191 downto 0);
 
+  -- Register map
+  signal reg_wr_en   : std_logic;
+  signal reg_wr_addr : unsigned(6 downto 0);
+  signal reg_wr_data : unsigned(7 downto 0);
+  signal reg_rd_addr : unsigned(6 downto 0);
+  signal reg_rd_data : unsigned(7 downto 0);
+  signal reg_triggers : std_logic_vector(10 downto 0);
+
+  -- UART
+  signal uart_wr_en   : std_logic;
+  signal uart_wr_addr : unsigned(6 downto 0);
+  signal uart_wr_data : unsigned(7 downto 0);
+
+  -- Sequencer triggers merged with register map triggers
+  signal merged_trig : std_logic_vector(10 downto 0);
+
+  -- Voice params from register map
+  signal bd_tone, bd_decay : unsigned(7 downto 0);
+
   -- Audio voices (12-bit signed)
   signal audio_bd, audio_sd, audio_lt, audio_mt, audio_ht : signed(11 downto 0);
   signal audio_rs, audio_cp, audio_cb, audio_cy, audio_oh, audio_ch : signed(11 downto 0);
@@ -83,6 +103,43 @@ begin
   led(7) <= playing;
   led(6 downto 4) <= std_logic_vector(edit_track(2 downto 0));
 
+  -- Register map: UART writes go directly
+  reg_wr_en   <= uart_wr_en;
+  reg_wr_addr <= uart_wr_addr;
+  reg_wr_data <= uart_wr_data;
+
+  u_regmap : entity work.register_map
+    port map (clk => clk_50mhz, rst => rst,
+              wr_en => reg_wr_en, wr_addr => reg_wr_addr, wr_data => reg_wr_data,
+              rd_addr => reg_rd_addr, rd_data => reg_rd_data,
+              triggers => reg_triggers, bpm => open, playing => open);
+
+  -- UART receiver
+  u_uart : entity work.uart_rx
+    port map (clk => clk_50mhz, rst => rst, rx => serial_rx,
+              wr_en => uart_wr_en, wr_addr => uart_wr_addr, wr_data => uart_wr_data);
+
+  -- Read BD params from register map (addr 0x20=tone, 0x30=decay)
+  -- Use a simple mux to read params at startup/continuously
+  process(clk_50mhz)
+    variable rd_phase : std_logic := '0';
+  begin
+    if rising_edge(clk_50mhz) then
+      if rd_phase = '0' then
+        reg_rd_addr <= to_unsigned(32, 7);  -- 0x20 = BD tone
+        bd_tone <= reg_rd_data;
+        rd_phase := '1';
+      else
+        reg_rd_addr <= to_unsigned(48, 7);  -- 0x30 = BD decay
+        bd_decay <= reg_rd_data;
+        rd_phase := '0';
+      end if;
+    end if;
+  end process;
+
+  -- Merge sequencer triggers with register map triggers (OR)
+  merged_trig <= trig_out(11 downto 1) or reg_triggers;
+
   -- Tempo clock
   u_tempo : entity work.tempo_clock
     port map (clk => clk_50mhz, rst => rst, bpm => bpm,
@@ -97,54 +154,54 @@ begin
               current_step => current_step, trig_out => trig_out,
               accent => accent_flag, pattern_flat => pattern_flat);
 
-  -- Drum voices: trig_out(0)=AC, (1)=BD, (2)=SD, (3)=LT, (4)=MT, (5)=HT
-  --              (6)=RS, (7)=CP, (8)=CB, (9)=CY, (10)=OH, (11)=CH
+  -- Drum voices
   u_bd : entity work.kick_drum
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => trig_out(1), audio_out => audio_bd);
+              trigger => merged_trig(0), tone => bd_tone, decay => bd_decay,
+              audio_out => audio_bd);
 
   u_sd : entity work.snare_drum
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => trig_out(2), audio_out => audio_sd);
+              trigger => merged_trig(1), audio_out => audio_sd);
 
   u_lt : entity work.tom
-    generic map (G_FREQ => to_unsigned(221, 16))  -- 165Hz
+    generic map (G_FREQ => to_unsigned(221, 16))
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => trig_out(3), audio_out => audio_lt);
+              trigger => merged_trig(2), audio_out => audio_lt);
 
   u_mt : entity work.tom
-    generic map (G_FREQ => to_unsigned(181, 16))  -- 135Hz
+    generic map (G_FREQ => to_unsigned(181, 16))
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => trig_out(4), audio_out => audio_mt);
+              trigger => merged_trig(3), audio_out => audio_mt);
 
   u_ht : entity work.tom
-    generic map (G_FREQ => to_unsigned(295, 16))  -- 220Hz
+    generic map (G_FREQ => to_unsigned(295, 16))
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => trig_out(5), audio_out => audio_ht);
+              trigger => merged_trig(4), audio_out => audio_ht);
 
   u_rs : entity work.rimshot
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => trig_out(6), audio_out => audio_rs);
+              trigger => merged_trig(5), audio_out => audio_rs);
 
   u_cp : entity work.clap
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => trig_out(7), audio_out => audio_cp);
+              trigger => merged_trig(6), audio_out => audio_cp);
 
   u_cb : entity work.cowbell
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => trig_out(8), audio_out => audio_cb);
+              trigger => merged_trig(7), audio_out => audio_cb);
 
   u_cy : entity work.cymbal
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => trig_out(9), audio_out => audio_cy);
+              trigger => merged_trig(8), audio_out => audio_cy);
 
   u_oh : entity work.open_hihat
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => trig_out(10), audio_out => audio_oh);
+              trigger => merged_trig(9), audio_out => audio_oh);
 
   u_ch : entity work.hihat
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
-              trigger => trig_out(11), audio_out => audio_ch);
+              trigger => merged_trig(10), audio_out => audio_ch);
 
   -- Mixer
   u_mixer : entity work.mixer
@@ -200,7 +257,7 @@ begin
               rot_center => rot_center, rot_event => rot_event,
               rot_dir => rot_dir, rot_press => rot_press);
 
-  -- Tempo control + rotary play/stop
+  -- Tempo control
   process(clk_50mhz)
   begin
     if rising_edge(clk_50mhz) then
@@ -219,7 +276,6 @@ begin
     end if;
   end process;
 
-  -- Rotary press = play/stop (directly pulse the sequencer)
   play_stop <= rot_press or play_stop_kbd;
 
   -- LCD
