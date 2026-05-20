@@ -37,15 +37,27 @@ def measure_decay_ms(sig, sr):
     return below[0] / sr * 1000
 
 def measure_tone_freq(sig, sr):
-    """Fundamental frequency via zero-crossings on lowpassed signal."""
+    """Fundamental frequency via zero-crossings on lowpassed signal.
+    Uses the middle portion of the signal where pitch has settled."""
     try:
         b, a = butter(4, min(1000/(sr/2), 0.99), btype='low')
         tone = filtfilt(b, a, sig)
     except:
         return 0
-    # Use first 50ms where tone is strongest
-    n = min(len(tone), int(sr * 0.05))
-    chunk = tone[:n]
+    # Find where signal is active (above 10% of peak)
+    env = np.abs(tone)
+    peak = env.max()
+    if peak < 1e-6:
+        return 0
+    active = np.where(env > peak * 0.1)[0]
+    if len(active) < 10:
+        return 0
+    # Use middle third of active region (settled, not attack or tail)
+    start = active[len(active) // 3]
+    end = active[2 * len(active) // 3]
+    if end - start < 10:
+        return 0
+    chunk = tone[start:end]
     zc = np.where(np.diff(np.sign(chunk)))[0]
     if len(zc) < 4:
         return 0
@@ -126,20 +138,39 @@ def compare_voice(ref_dir, syn_dir, prefix="ideal_"):
         s_noise = measure_noise_ratio(syn_sig, sr)
         ec = envelope_corr(ref_sig, syn_sig, sr)
 
-        # Flags
+        # Flags — adapt thresholds based on signal type
         flags = []
+        is_noisy = r_noise > 50 or s_noise > 50
+
         if r_dec > 0:
             ratio = s_dec / r_dec
             if ratio > 1.5 or ratio < 0.67:
                 flags.append(f"DECAY({s_dec:.0f}vs{r_dec:.0f}ms)")
-        if r_freq > 0 and s_freq > 0:
+
+        # FREQ only meaningful for tonal signals
+        if not is_noisy and r_freq > 0 and s_freq > 0:
             ratio = s_freq / r_freq
             if ratio > 1.2 or ratio < 0.8:
                 flags.append(f"FREQ({s_freq:.0f}vs{r_freq:.0f}Hz)")
-        if r_noise > 10 or s_noise > 10:
-            if abs(r_noise - s_noise) > 20:
-                flags.append(f"MIX({s_noise:.0f}vs{r_noise:.0f}%)")
-        if ec < 0.85:
+
+        # For noisy signals, compare spectral centroid instead
+        if is_noisy:
+            r_cent = measure_noise_centroid(ref_sig, sr)
+            s_cent = measure_noise_centroid(syn_sig, sr)
+            if r_cent > 0 and s_cent > 0:
+                ratio = s_cent / r_cent
+                if ratio > 1.5 or ratio < 0.67:
+                    flags.append(f"CENT({s_cent:.0f}vs{r_cent:.0f}Hz)")
+
+        if not is_noisy:
+            if r_noise > 10 or s_noise > 10:
+                if abs(r_noise - s_noise) > 20:
+                    flags.append(f"MIX({s_noise:.0f}vs{r_noise:.0f}%)")
+
+        # ENV threshold: relaxed for noisy signals (random phase)
+        # Pure noise (>95%) can't correlate at all — skip ENV
+        env_threshold = 0.60 if is_noisy else 0.85
+        if r_noise < 95 and s_noise < 95 and ec < env_threshold:
             flags.append(f"ENV({ec:.2f})")
 
         flag_str = " ".join(flags) if flags else "✓"

@@ -44,7 +44,7 @@ def render_kick(n_samples, tone=5.0, decay=5.0):
     # Decay: measured -20dB times from references:
     #   decay=0: 18ms, 2.5: 22ms, 5.0: 60ms, 7.5: 78ms, 10: 155ms
     # Empirical tau values tuned to match measured -20dB times:
-    tau_a_table = {0: 0.015, 2.5: 0.028, 5.0: 0.100, 7.5: 0.140, 10.0: 0.500}
+    tau_a_table = {0: 0.022, 2.5: 0.030, 5.0: 0.100, 7.5: 0.140, 10.0: 0.300}
     # Interpolate
     knobs = sorted(tau_a_table.keys())
     taus = [tau_a_table[k] for k in knobs]
@@ -56,41 +56,35 @@ def render_kick(n_samples, tone=5.0, decay=5.0):
     return sig
 
 def render_snare(n_samples, tone=5.0, snappy=5.0):
-    """SD: Two sine oscillators + LFSR noise through simple HPF.
-    All operations map to VHDL: sine table, shifts, LFSR, IIR.
-    tone:   0-10, balance between low osc (~167Hz) and high osc (~333Hz)
-    snappy: 0-10, noise level
+    """SD: Two bridged-T oscillators + noise.
+    Service manual design: 238/476Hz. Actual recording: ~173/346Hz.
+    Using recorded values (component tolerances shift frequency).
+    tone:   0-10, output ratio of the two oscillators
+    snappy: 0-10, noise envelope amplitude
     """
     t = np.arange(n_samples) / SR
-    # Two oscillators (from shared sine table in VHDL)
-    osc_lo = np.sin(2 * np.pi * 167 * t)
-    osc_hi = np.sin(2 * np.pi * 333 * t)
-    # TONE knob: crossfade between oscillators
-    # Both always present, TONE shifts the balance
-    lo_gain = 1.0 - (tone / 10.0) * 0.8   # 1.0 → 0.2
-    hi_gain = 0.2 + (tone / 10.0) * 0.8   # 0.2 → 1.0
-    tone_sig = osc_lo * lo_gain + osc_hi * hi_gain
-    # Each oscillator has its own decay (measured from references):
-    # Low osc (167Hz): slow decay, tau~42ms (K=11)
-    # High osc (333Hz): fast decay, tau~5ms (K=8)
-    lo_tau = (2**11) / SR  # ~42ms
-    hi_tau = (2**8) / SR   # ~5ms
+    # Two oscillators: ~173Hz and ~346Hz (measured from recording)
+    osc_lo = np.sin(2 * np.pi * 173 * t)
+    osc_hi = np.sin(2 * np.pi * 346 * t)
+    # TONE knob: balance between fundamental and harmonic
+    lo_gain = 1.0 - (tone / 10.0) * 0.8
+    hi_gain = 0.2 + (tone / 10.0) * 0.8
+    # Decay: ~30ms fundamental, ~15ms harmonic (gives -20dB at ~46ms)
+    lo_tau = 0.030
+    hi_tau = 0.015
     tone_sig = osc_lo * lo_gain * np.exp(-t / lo_tau) + osc_hi * hi_gain * np.exp(-t / hi_tau)
-    # Noise: LFSR (white) through simple HPF
-    # VHDL: LFSR + single-stage IIR HPF (hp += (input - hp) >> 3)
+    # Noise: LFSR through HPF
     np.random.seed(42)
     noise = np.random.randn(n_samples)
-    # Simple 1-pole HPF at ~2kHz: y[n] = x[n] - lp[n], lp += (x-lp)>>3
     lp = 0.0
     hpf_out = np.zeros(n_samples)
-    alpha = 1.0 / 8.0  # >>3
+    alpha = 1.0 / 8.0
     for i in range(n_samples):
         lp += (noise[i] - lp) * alpha
         hpf_out[i] = noise[i] - lp
-    # Noise decay: K=11 (tau~42ms)
     noise_tau = (2**11) / SR
     hpf_out *= np.exp(-t / noise_tau)
-    # SNAPPY knob: noise gain (0 = off, 10 = loud)
+    # SNAPPY knob
     noise_gain = max(0, (snappy - 1.5) / 8.5)
     return tone_sig + hpf_out * noise_gain * 0.8
 
@@ -104,61 +98,121 @@ def square_osc_mix(n_samples, freqs):
     return sig
 
 def render_ch(n_samples):
+    """CH: 6 square oscillators + HPF. Measured: decay=34ms, centroid=11.5kHz."""
     freqs = [204.7, 304.4, 369.6, 522.7, 540.4, 800.6]
     t = np.arange(n_samples) / SR
     sig = square_osc_mix(n_samples, freqs)
     sig = hpf(sig, 6000)
-    return sig * np.exp(-t / 0.042)
+    return sig * np.exp(-t / 0.015)  # tau=15ms gives -20dB at ~34ms
 
-def render_oh(n_samples):
+def render_oh(n_samples, decay=5.0):
+    """OH: Same 6 oscillators + HPF, longer decay.
+    decay: 0-10, controls decay time (74-448ms measured)."""
     freqs = [204.7, 304.4, 369.6, 522.7, 540.4, 800.6]
     t = np.arange(n_samples) / SR
     sig = square_osc_mix(n_samples, freqs)
     sig = hpf(sig, 6000)
-    return sig * np.exp(-t / 0.200)
+    # Decay: 74ms (knob=0) to 448ms (knob=10)
+    tau_table = {0: 0.032, 2.5: 0.077, 5.0: 0.200, 7.5: 0.250, 10.0: 0.280}
+    knobs = sorted(tau_table.keys())
+    taus = [tau_table[k] for k in knobs]
+    tau = np.interp(decay, knobs, taus)
+    return sig * np.exp(-t / tau)
 
-def render_cymbal(n_samples):
+def render_cymbal(n_samples, tone=5.0, decay=5.0):
+    """CY: 6 square oscillators + HPF. 25 refs (TONE x DECAY)."""
     freqs = [204.7, 304.4, 369.6, 522.7, 540.4, 800.6]
     t = np.arange(n_samples) / SR
     sig = square_osc_mix(n_samples, freqs)
-    sig = hpf(sig, 4000)
-    return sig * np.exp(-t / 0.670)
+    # TONE controls HPF cutoff
+    hpf_freq = 4000 + (tone / 10.0) * 4000  # 4kHz to 8kHz
+    sig = hpf(sig, hpf_freq)
+    # DECAY: long, ~500ms to 2s
+    tau = 0.200 + (decay / 10.0) * 0.600
+    return sig * np.exp(-t / tau)
 
 def render_cowbell(n_samples):
+    """CB: 2 square oscillators + BPF. Measured: freq=822Hz, decay=42ms, centroid=2285Hz."""
     t = np.arange(n_samples) / SR
     sig = np.sign(np.sin(2*np.pi*540*t)) + np.sign(np.sin(2*np.pi*800*t))
-    sig = bpf(sig, 667, 933)
-    return sig * np.exp(-t / 0.042)
+    sig = bpf(sig, 500, 1500)
+    return sig * np.exp(-t / 0.030)  # tau=30ms gives -20dB at ~42ms
 
 def render_clap(n_samples):
+    """CP: Noise bursts + BPF. Measured: decay=29ms, centroid=4890Hz."""
     t = np.arange(n_samples) / SR
     noise = np.random.randn(n_samples)
-    noise_filt = bpf(noise, 750, 1250)
-    # Burst envelope: 3 bursts (5ms on, 15ms gap), then tail
-    env = np.zeros(n_samples)
-    burst_on = int(0.005 * SR)
-    burst_gap = int(0.015 * SR)
-    pos = 0
-    for _ in range(3):
-        burst_t = np.arange(burst_on) / SR
-        env[pos:pos+burst_on] = np.exp(-burst_t / 0.003)  # fast sawtooth-like decay
-        pos += burst_on + burst_gap
-    # Tail
-    tail_t = np.arange(n_samples - pos) / SR
-    env[pos:] = np.exp(-tail_t / 0.084)
+    noise_filt = bpf(noise, 1000, 8000)
+    # Envelope: rapid attack then exponential decay with slight re-triggers
+    # Simpler model: just shaped decay that matches 29ms -20dB
+    env = np.exp(-t / 0.018)
+    # Add 3 short re-trigger bumps in first 10ms
+    for bump_ms in [2, 5, 8]:
+        idx = int(bump_ms * SR / 1000)
+        bump_len = int(0.002 * SR)
+        if idx + bump_len < n_samples:
+            env[idx:idx+bump_len] = np.maximum(env[idx:idx+bump_len], 0.8)
     return noise_filt * env
 
 def render_rimshot(n_samples):
+    """RS: 455Hz bridged-T through swing-type VCA (adds harmonics).
+    Service manual: freq=455Hz, decay=2.2ms. VCA adds many high harmonics.
+    Recording shows 79% energy above 1kHz, centroid=4594Hz.
+    The swing VCA is heavily nonlinear — almost turns sine into square."""
     t = np.arange(n_samples) / SR
-    sig = (np.sin(2*np.pi*455*t) + np.sin(2*np.pi*680*t) + np.sin(2*np.pi*1020*t)) / 3
-    sig = hpf(sig, 400)
-    return sig * np.exp(-t / 0.002)
+    # 455Hz resonator
+    sig = np.sin(2 * np.pi * 455 * t)
+    # Swing VCA: heavy distortion (hard clip to near-square)
+    sig = np.clip(sig * 4, -1, 1)
+    # Fast decay: service manual says 2.2ms, recording shows -20dB at 9ms
+    env = np.exp(-t / 0.004)
+    return sig * env
 
-def render_tom(n_samples):
+def render_tom(n_samples, tuning=5.0):
+    """Tom: Sine with pitch dive. Parameterized by TUNING knob.
+    Measured frequencies: LT 82-100Hz, MT 124-155Hz, HT 170-214Hz.
+    This renders MT by default; LT/HT use freq_base parameter."""
     t = np.arange(n_samples) / SR
-    freq = 135 + (160 - 135) * np.exp(-t / 0.005)
+    # MT: 124Hz (tuning=0) to 155Hz (tuning=10)
+    freq_base = 124 + (155 - 124) * (tuning / 10.0)
+    freq_start = freq_base * 1.25  # 25% pitch dive
+    tau_p = 0.005  # pitch sweep tau
+    tau_a = 0.060  # amplitude decay ~83-97ms to -20dB
+    freq = freq_base + (freq_start - freq_base) * np.exp(-t / tau_p)
     phase = 2 * np.pi * np.cumsum(freq) / SR
-    return np.sin(phase) * np.exp(-t / 0.084)
+    return np.sin(phase) * np.exp(-t / tau_a)
+
+def render_tom_lt(n_samples, tuning=5.0):
+    """LT: Low Tom. Measured: 82-100Hz, decay 76-111ms."""
+    t = np.arange(n_samples) / SR
+    freq_base = 82 + (100 - 82) * (tuning / 10.0)
+    freq_start = freq_base * 1.25
+    freq = freq_base + (freq_start - freq_base) * np.exp(-t / 0.005)
+    phase = 2 * np.pi * np.cumsum(freq) / SR
+    return np.sin(phase) * np.exp(-t / 0.070)
+
+def render_tom_ht(n_samples, tuning=5.0):
+    """HT: Hi Tom. Measured: 170-214Hz, decay 72-94ms."""
+    t = np.arange(n_samples) / SR
+    freq_base = 170 + (214 - 170) * (tuning / 10.0)
+    freq_start = freq_base * 1.25
+    freq = freq_base + (freq_start - freq_base) * np.exp(-t / 0.005)
+    phase = 2 * np.pi * np.cumsum(freq) / SR
+    return np.sin(phase) * np.exp(-t / 0.035)
+
+def render_maracas(n_samples):
+    """MA: Short noise burst. Measured: decay=9ms, centroid=11.3kHz."""
+    t = np.arange(n_samples) / SR
+    noise = np.random.randn(n_samples)
+    noise_filt = hpf(noise, 5000)
+    return noise_filt * np.exp(-t / 0.004)
+
+def render_claves(n_samples):
+    """CL: Short resonant tone. Measured: decay=22ms, centroid=3667Hz."""
+    t = np.arange(n_samples) / SR
+    # Similar to rimshot but lower frequency, longer decay
+    sig = np.sin(2 * np.pi * 2500 * t)
+    return sig * np.exp(-t / 0.010)
 
 def render_demo():
     """120 BPM, 4 seconds, 16 steps."""
