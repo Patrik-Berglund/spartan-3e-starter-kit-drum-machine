@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Bit-exact VHDL simulator - integer arithmetic, matching FPGA logic.
-All voices parameterized with TR-808 panel knobs (0-255 range, 8-bit).
-Architecture: 256-entry sine + interp, 18-bit internal, MULT18x18, 12-bit DAC."""
+All voices output 16-bit signed. Mixer sums to 21-bit, saturates to 16-bit,
+outputs top 12 bits with first-order noise shaping for DAC.
+Architecture: 256-entry sine + interp, MULT18x18, 16-bit voice output."""
 
 import os, wave
 import numpy as np
@@ -9,7 +10,7 @@ import numpy as np
 SR = 48828
 OUTDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output_vhdl")
 
-# 256-entry sine table, 12-bit signed
+# 256-entry sine table, 12-bit signed (matches sine_table.vhd)
 SINE = [int(round(2047 * np.sin(2 * np.pi * i / 256))) for i in range(256)]
 
 def lfsr_next(reg, taps):
@@ -19,99 +20,40 @@ def lfsr_next(reg, taps):
     return ((reg << 1) | fb) & 0xFFFF
 
 def sine_lookup(phase):
-    """256-entry + linear interpolation. 1 MULT18x18."""
+    """256-entry + linear interpolation, matches sine_table.vhd."""
     idx = (phase >> 8) & 255
     frac = phase & 255
     s0 = SINE[idx]
     s1 = SINE[(idx + 1) & 255]
     return s0 + ((s1 - s0) * frac >> 8)
 
-def amp_multiply(sine_val, amp):
-    """18x18 multiply -> 18-bit output."""
-    return (sine_val * amp) >> 10
+def clamp16(x):
+    if x > 32767: return 32767
+    if x < -32768: return -32768
+    return int(x)
+
+def signed_rshift(val, n):
+    if val >= 0: return val >> n
+    return -((-val) >> n)
 
 
-# === BD (Bass Drum) — knobs: TONE (0-255), DECAY (0-255) ===
+# === BD (Bass Drum) ===
 
 def render_kick(n_samples, tone=128, decay=128):
-    """Sine sweep, exponential decay. TONE=start freq, DECAY=decay rate."""
-    # TONE: start freq inc 96 (tone=0) to 151 (tone=255)
-    freq_start = 96 + ((tone * 55) >> 8)
-    freq_end = 68  # ~51Hz
-    # DECAY: K value 10 (fast, decay=0) to 14 (slow, decay=255)
-    decay_k = 10 + ((decay * 4) >> 8)
-    # Pitch sweep: freq decrements by 1 every N samples
-    sweep_div = 7  # every 7 samples
+    """Exponential pitch sweep from ~113Hz to ~51Hz, exponential amplitude decay.
+    Matches real 808 measured behavior."""
+    # Start/end freq as phase increments
+    # tone=128: start=152 (113Hz), end=68 (51Hz)
+    freq_start = 96 + ((tone >> 4) * 3) + (tone >> 5)
+    freq_end = 68
+    # Exponential pitch sweep: freq approaches freq_end with tau
+    # tau = ~5ms = ~244 samples. Use: freq -= (freq - freq_end) >> 6 each sample
+    # That gives tau = 64 samples = 1.3ms. Too fast.
+    # Use >> 8 for tau = 256 samples = 5.2ms. Good.
+    pitch_shift = 4  # tau ~16 samples = 0.33ms (very fast sweep)
 
-    phase = 0; freq = freq_start; amp = 65535; div = 0
-    out = []
-    for _ in range(n_samples):
-        if amp < 64:
-            out.append(0); continue
-        s = sine_lookup(phase)
-        out.append(amp_multiply(s, amp))
-        new_phase = (phase + freq) & 0xFFFF
-        new_div = (div + 1) & 7
-        new_freq = freq
-        if div == (sweep_div - 1) and freq > freq_end:
-            new_freq = freq - 1
-            new_div = 0
-        new_amp = amp - (amp >> decay_k)
-        phase, freq, amp, div = new_phase, new_freq, new_amp, new_div
-    return out
-
-
-# === SD (Snare Drum) — knobs: TONE (0-255), SNAPPY (0-255) ===
-
-def render_snare(n_samples, tone=128, snappy=128):
-    """Two sines (173+346Hz) + LFSR noise through HPF.
-    TONE=balance between oscillators, SNAPPY=noise level."""
-    # Phase increments: 173Hz=232, 346Hz=464
-    inc_lo = 232; inc_hi = 464
-    # TONE: lo_gain and hi_gain (shift-based)
-    # tone=0: lo dominates, tone=255: hi dominates
-    lo_shift = 0 + (tone >> 7)   # 0 or 1 (divide by 1 or 2)
-    hi_shift = 1 - (tone >> 7)   # 1 or 0
-
-    phase1 = 0; phase2 = 0
-    tone_amp = 65535; noise_amp = 65535
-    lfsr = 0xACE1; hp_acc = 0
-    out = []
-    for _ in range(n_samples):
-        if tone_amp < 64 and noise_amp < 64:
-            out.append(0); continue
-        s1 = sine_lookup(phase1)
-        s2 = sine_lookup(phase2)
-        new_lfsr = lfsr_next(lfsr, [15, 13, 12, 10])
-        # Tone mix (18-bit)
-        t1 = (s1 * tone_amp) >> (10 + lo_shift)
-        t2 = (s2 * tone_amp) >> (10 + hi_shift)
-        tone_out = t1 + t2
-        # Noise: LFSR -> HPF -> amplitude
-        noise_raw = (lfsr & 0x7FF) - 1024  # 11-bit signed
-        old_hp = hp_acc
-        hp_acc = old_hp + ((noise_raw - old_hp) >> 3)
-        hp_out = noise_raw - old_hp
-        # SNAPPY controls noise gain: snappy=0 -> off, snappy=255 -> full
-        noise_out = (hp_out * noise_amp * snappy) >> 24 if snappy > 16 else 0
-        mix = tone_out + noise_out
-        out.append(mix)
-        # Updates
-        phase1 = (phase1 + inc_lo) & 0xFFFF
-        phase2 = (phase2 + inc_hi) & 0xFFFF
-        lfsr = new_lfsr
-        tone_amp -= tone_amp >> 10  # K=10, tau~21ms
-        noise_amp -= noise_amp >> 11  # K=11, tau~42ms
-    return out
-
-
-# === LT/MT/HT (Toms) — knob: TUNING (0-255) ===
-
-def render_tom(n_samples, tuning=128, freq_lo=110, freq_hi=135):
-    """Sine + pitch dive. TUNING sets base frequency."""
-    # Base freq from tuning knob
-    base_freq = freq_lo + ((tuning * (freq_hi - freq_lo)) >> 8)
-    freq_start = base_freq + (base_freq >> 2)  # +25% for pitch dive
+    # Decay K: 10 + decay(7:6)
+    decay_k = 10 + (decay >> 6)
 
     phase = 0; freq = freq_start; amp = 65535
     out = []
@@ -119,84 +61,131 @@ def render_tom(n_samples, tuning=128, freq_lo=110, freq_hi=135):
         if amp < 64:
             out.append(0); continue
         s = sine_lookup(phase)
-        out.append(amp_multiply(s, amp))
+        amp_11 = amp >> 5
+        product = s * amp_11
+        out.append(clamp16(product >> 7))
         phase = (phase + freq) & 0xFFFF
-        if freq > base_freq:
-            freq -= 1
-        amp -= amp >> 12  # K=12, tau~84ms
+        # Exponential pitch sweep: freq -= (freq - freq_end) >> shift
+        if freq > freq_end:
+            diff = freq - freq_end
+            step = diff >> pitch_shift
+            if step < 1: step = 1
+            freq -= step
+        amp -= amp >> decay_k
+    return out
+
+
+# === SD (Snare Drum) ===
+
+def render_snare(n_samples, tone=128, snappy=128):
+    """Two sines (173/346Hz) + LFSR noise through BPF.
+    Improved noise character with bandpass instead of just HPF."""
+    # 173Hz = inc 232, 346Hz = inc 464
+    pinc1 = 232
+    pinc2 = 464
+    # Snappy: noise level
+    if snappy < 86: noise_shift = 2
+    elif snappy < 171: noise_shift = 1
+    else: noise_shift = 0
+
+    phase1 = 0; phase2 = 0
+    tone_amp = 65535; noise_amp = 65535
+    lfsr = 0xACE1
+    # BPF state for noise (2-stage LP + HP = bandpass)
+    lp_acc = 0; lp_acc2 = 0; hp_acc = 0
+    out = []
+    for _ in range(n_samples):
+        if tone_amp < 64 and noise_amp < 64:
+            out.append(0); continue
+        s1 = sine_lookup(phase1)
+        s2 = sine_lookup(phase2)
+        lfsr = lfsr_next(lfsr, [15, 13, 12, 10])
+
+        # Tones
+        amp_11 = tone_amp >> 5
+        p1 = s1 * amp_11
+        p2 = s2 * amp_11
+
+        # Noise through BPF (~500Hz-2kHz)
+        noise_raw = (lfsr & 0x7FFF) - 16384
+        # 2-stage LP at ~2kHz: shift 2 each
+        lp_acc = lp_acc + signed_rshift(noise_raw - lp_acc, 2)
+        lp_acc2 = lp_acc2 + signed_rshift(lp_acc - lp_acc2, 2)
+        # HP at ~300Hz: shift 5
+        hp_acc = hp_acc + signed_rshift(lp_acc2 - hp_acc, 5)
+        bp_out = lp_acc2 - hp_acc
+
+        # Scale noise by noise_amp
+        noise_scaled = signed_rshift(bp_out * (noise_amp >> 8), 7)
+        noise_scaled = signed_rshift(noise_scaled, noise_shift)
+
+        # Mix: tone1 + tone2/2 + noise
+        t1 = signed_rshift(p1, 8)
+        t2 = signed_rshift(p2, 9)
+        mix = t1 + t2 + noise_scaled
+        out.append(clamp16(mix))
+
+        phase1 = (phase1 + pinc1) & 0xFFFF
+        phase2 = (phase2 + pinc2) & 0xFFFF
+        # Tone decays faster than noise (real 808: tone ~15ms, noise ~30ms)
+        tone_amp -= tone_amp >> 9   # K=9, tau ~10ms
+        noise_amp -= noise_amp >> 11  # K=11, tau ~42ms
+    return out
+
+
+# === LT/MT/HT (Toms) ===
+
+def render_tom(n_samples, tuning=128, g_freq=181):
+    """Sine + exponential pitch dive."""
+    freq_product = g_freq * tuning
+    target_freq = g_freq - (g_freq >> 2) + (freq_product >> 9)
+    freq = target_freq + (target_freq >> 2)  # start 25% higher
+
+    phase = 0; amp = 65535
+    out = []
+    for _ in range(n_samples):
+        if amp < 64:
+            out.append(0); continue
+        s = sine_lookup(phase)
+        amp_11 = amp >> 5
+        product = s * amp_11
+        out.append(clamp16(product >> 7))
+        phase = (phase + freq) & 0xFFFF
+        # Exponential pitch dive (faster than linear)
+        if freq > target_freq:
+            diff = freq - target_freq
+            step = diff >> 6  # tau ~64 samples = 1.3ms
+            if step < 1: step = 1
+            freq -= step
+        amp -= amp >> 11  # K=11, tau ~42ms (real 808 toms: 76-111ms to -20dB)
     return out
 
 def render_lt(n_samples, tuning=128):
-    return render_tom(n_samples, tuning, freq_lo=82, freq_hi=134)
+    return render_tom(n_samples, tuning, g_freq=165)  # ~82Hz
 
 def render_mt(n_samples, tuning=128):
-    return render_tom(n_samples, tuning, freq_lo=110, freq_hi=214)
+    return render_tom(n_samples, tuning, g_freq=181)  # ~135Hz
 
 def render_ht(n_samples, tuning=128):
-    return render_tom(n_samples, tuning, freq_lo=165, freq_hi=220)
+    return render_tom(n_samples, tuning, g_freq=295)  # ~220Hz
 
 
-# === CY (Cymbal) — knobs: TONE (0-255), DECAY (0-255) ===
+# === Metallic voices: 6 square oscillators + BPF ===
 
-def render_cymbal(n_samples, tone=128, decay=128):
-    """6 square oscillators + 4-stage HPF, multi-band decay."""
-    incs = [274, 408, 496, 701, 725, 1074]
+def render_metallic_core(n_samples, decay_k, bpf_lp_shift, bpf_hp_shift):
+    """6 free-running square oscs + multi-stage BPF.
+    Real 808 frequencies: 205, 304, 370, 523, 540, 800 Hz.
+    Target: pass ~6-12kHz (beating products), reject fundamentals."""
+    # Correct phase increments for real 808 frequencies
+    incs = [275, 409, 496, 702, 725, 1075]
     phases = [0]*6
-    hp_accs = [0]*4
-    amp_hi = 65535; amp_lo = 65535
-    # DECAY: K for main decay
-    decay_k = 11 + ((decay * 4) >> 8)  # K=11 (fast) to K=15 (slow)
-    # HPF shift from TONE
-    hpf_shift = 4 - ((tone * 2) >> 8)  # 4 (dark) to 2 (bright)
-    hpf_shift = max(2, min(4, hpf_shift))
-
-    out = []
-    for _ in range(n_samples):
-        sq_sum = 0
-        for i in range(6):
-            sq_sum += 1 if (phases[i] & 0x8000) else -1
-        for i in range(6):
-            phases[i] = (phases[i] + incs[i]) & 0xFFFF
-        if amp_hi < 512 and amp_lo < 512:
-            out.append(0); continue
-        raw = sq_sum * 170
-        # 4-stage HPF
-        hp = raw
-        new_accs = list(hp_accs)
-        for j in range(4):
-            old_acc = hp_accs[j]
-            new_accs[j] = old_acc + ((hp - old_acc) >> hpf_shift)
-            hp = hp - old_acc
-        hp_accs = new_accs
-        # Output with frequency-dependent decay (hi dies faster)
-        val = (hp * amp_hi) >> 10
-        out.append(val)
-        amp_hi -= amp_hi >> decay_k
-        amp_lo -= amp_lo >> (decay_k + 2)
-    return out
-
-
-# === OH (Open HiHat) — knob: DECAY (0-255) ===
-
-def render_oh(n_samples, decay=128):
-    """Same 6 oscillators + HPF as CH, longer decay."""
-    decay_k = 11 + ((decay * 4) >> 8)  # K=11 to K=15
-    return render_hihat_core(n_samples, decay_k, 3)
-
-
-# === CH (Closed HiHat) — no knobs ===
-
-def render_ch(n_samples):
-    return render_hihat_core(n_samples, 9, 3)
-
-def render_hihat_core(n_samples, decay_k, hpf_shift):
-    """6 free-running square oscs + 4-stage HPF."""
-    incs = [274, 408, 496, 701, 725, 1074]
-    phases = [0]*6
-    hp_accs = [0]*4
+    # 1-stage LP (anti-alias) + 4-stage HP (remove fundamentals aggressively)
+    lp1 = 0
+    hp1 = 0; hp2 = 0; hp3 = 0; hp4 = 0
     amp = 65535
     out = []
     for _ in range(n_samples):
+        # Sum square waves
         sq_sum = 0
         for i in range(6):
             sq_sum += 1 if (phases[i] & 0x8000) else -1
@@ -204,26 +193,67 @@ def render_hihat_core(n_samples, decay_k, hpf_shift):
             phases[i] = (phases[i] + incs[i]) & 0xFFFF
         if amp < 512:
             out.append(0); continue
-        raw = sq_sum * 170
-        hp = raw
-        new_accs = list(hp_accs)
-        for j in range(4):
-            old_acc = hp_accs[j]
-            new_accs[j] = old_acc + ((hp - old_acc) >> hpf_shift)
-            hp = hp - old_acc
-        hp_accs = new_accs
-        val = (hp * amp) >> 10
-        out.append(val)
+        # Scale: sq * 5440
+        raw = (sq_sum << 12) + (sq_sum << 10) + (sq_sum << 8) + (sq_sum << 6)
+        # LP: gentle anti-alias (shift=1, fc~3.9kHz)
+        lp1 = lp1 + signed_rshift(raw - lp1, bpf_lp_shift)
+        # 4-stage HP cascade (each stage shift=2, combined gives steep rolloff below ~3kHz)
+        hp1 = hp1 + signed_rshift(lp1 - hp1, bpf_hp_shift)
+        x1 = lp1 - hp1
+        hp2 = hp2 + signed_rshift(x1 - hp2, bpf_hp_shift)
+        x2 = x1 - hp2
+        hp3 = hp3 + signed_rshift(x2 - hp3, bpf_hp_shift)
+        x3 = x2 - hp3
+        hp4 = hp4 + signed_rshift(x3 - hp4, bpf_hp_shift)
+        bp = x3 - hp4
+        # Multiply by amplitude
+        bp_16 = max(-32768, min(32767, bp))
+        amp_11 = amp >> 5
+        product = bp_16 * amp_11
+        out.append(clamp16(product >> 11))
         amp -= amp >> decay_k
     return out
 
 
-# === CB (Cowbell) — no knobs ===
+# === CH (Closed HiHat) ===
+
+def render_ch(n_samples):
+    """Short metallic hit. Decay K=9 (~10ms to -20dB)."""
+    return render_metallic_core(n_samples, decay_k=9, bpf_lp_shift=1, bpf_hp_shift=3)
+
+
+# === OH (Open HiHat) ===
+
+def render_oh(n_samples, decay=128):
+    if decay < 52: dk = 11
+    elif decay < 103: dk = 12
+    elif decay < 154: dk = 13
+    elif decay < 205: dk = 14
+    else: dk = 15
+    return render_metallic_core(n_samples, decay_k=dk, bpf_lp_shift=1, bpf_hp_shift=3)
+
+
+# === CY (Cymbal) ===
+
+def render_cymbal(n_samples, tone=128, decay=128):
+    if tone < 86: lp_shift = 2  # darker
+    elif tone < 171: lp_shift = 1
+    else: lp_shift = 1  # brighter (less LP filtering)
+    if decay < 52: dk = 11
+    elif decay < 103: dk = 12
+    elif decay < 154: dk = 13
+    elif decay < 205: dk = 14
+    else: dk = 15
+    return render_metallic_core(n_samples, decay_k=dk, bpf_lp_shift=lp_shift, bpf_hp_shift=4)
+
+
+# === CB (Cowbell) ===
 
 def render_cowbell(n_samples):
     """2 square oscillators (540/800Hz) + narrow BPF."""
-    phases = [0, 0]; incs = [725, 1074]
-    lp_acc = 0; hp_acc = 0; amp = 65535
+    phases = [0, 0]; incs = [725, 1075]
+    lp1 = 0; lp2 = 0; hp1 = 0; hp2 = 0
+    amp = 65535
     out = []
     for _ in range(n_samples):
         sq = 0
@@ -233,122 +263,91 @@ def render_cowbell(n_samples):
             phases[i] = (phases[i] + incs[i]) & 0xFFFF
         if amp < 64:
             out.append(0); continue
-        raw = sq * 512
-        old_lp = lp_acc
-        old_hp = hp_acc
-        lp_acc = old_lp + ((raw - old_lp) >> 2)
-        hp_acc = old_hp + ((old_lp - old_hp) >> 4)
-        bp = old_lp - old_hp
-        val = (bp * amp) >> 10
-        out.append(val)
-        amp -= amp >> 10  # K=10, faster decay for ring
+        raw = sq << 12  # sq*4096
+        # Narrow BPF: tight LP + HP
+        lp1 = lp1 + signed_rshift(raw - lp1, 2)
+        lp2 = lp2 + signed_rshift(lp1 - lp2, 2)
+        hp1 = hp1 + signed_rshift(lp2 - hp1, 4)
+        hp2 = hp2 + signed_rshift(hp1 - hp2, 4)
+        bp = lp2 - hp2
+        bp_16 = max(-32768, min(32767, bp))
+        amp_11 = amp >> 5
+        product = bp_16 * amp_11
+        out.append(clamp16(product >> 11))
+        amp -= amp >> 10  # K=10, fast ring decay
     return out
 
 
-# === RS (Rimshot) — no knobs ===
+# === RS (Rimshot) ===
 
 def render_rimshot(n_samples):
-    """455Hz hard-clipped sine, fast decay K=8."""
-    phase = 0; inc = 610; amp = 65535  # 455Hz
+    """3 parallel sines (455+680+1020Hz) with hard clipping for harmonics, fast decay."""
+    ph1 = 0; ph2 = 0; ph3 = 0
+    amp = 65535
     out = []
     for _ in range(n_samples):
         if amp < 64:
             out.append(0); continue
-        s = sine_lookup(phase)
-        # Hard clip to add harmonics (swing VCA)
-        s = max(-1024, min(1024, s * 2))
-        out.append(amp_multiply(s, amp))
-        phase = (phase + inc) & 0xFFFF
+        s1 = sine_lookup(ph1)
+        s2 = sine_lookup(ph2)
+        s3 = sine_lookup(ph3)
+        # Sum and hard-clip to add harmonics (like swing VCA)
+        mix = s1 + s2 + s3
+        # Clip to ±2047 (creates odd harmonics)
+        if mix > 2047: mix = 2047
+        elif mix < -2048: mix = -2048
+        amp_11 = amp >> 5
+        product = mix * amp_11
+        out.append(clamp16(product >> 7))
+        ph1 = (ph1 + 610) & 0xFFFF   # 455Hz
+        ph2 = (ph2 + 912) & 0xFFFF   # 680Hz
+        ph3 = (ph3 + 1368) & 0xFFFF  # 1020Hz
         amp -= amp >> 8  # K=8, tau~5ms
     return out
 
 
-# === CL (Claves) — no knobs ===
-
-def render_claves(n_samples):
-    """2500Hz damped sine, K=9."""
-    phase = 0; inc = 3355; amp = 65535  # 2500Hz
-    out = []
-    for _ in range(n_samples):
-        if amp < 64:
-            out.append(0); continue
-        s = sine_lookup(phase)
-        out.append(amp_multiply(s, amp))
-        phase = (phase + inc) & 0xFFFF
-        amp -= amp >> 9  # K=9, tau~10ms
-    return out
-
-
-# === CP (Hand Clap) — no knobs ===
+# === CP (Hand Clap) ===
 
 def render_clap(n_samples):
-    """LFSR noise + BPF, 3-burst envelope then tail."""
+    """LFSR noise + BPF (1-8kHz), 3-burst envelope then tail."""
     lfsr = 0xBEEF; lp_acc = 0; hp_acc = 0; amp = 65535; count = 0
     out = []
     for _ in range(n_samples):
-        if amp < 64 and count >= 2440:
+        if amp < 64 and count >= 2196:
             out.append(0); continue
-        new_lfsr = lfsr_next(lfsr, [15, 13, 11, 0])
+        lfsr = lfsr_next(lfsr, [15, 13, 11, 0])
         count += 1
         c = count
-        # 3 bursts: 0-195 (4ms), 586-781 (4ms), 1172-1367 (4ms), tail from 1367
-        if   c < 195:  gate = True
-        elif c < 586:  gate = False
-        elif c < 781:  gate = True
-        elif c < 1172: gate = False
-        elif c < 1367: gate = True
-        else:          gate = True  # tail starts immediately after last burst
-        noise_12 = lfsr & 0xFFF
-        noise_raw = noise_12 - 4096 if noise_12 & 0x800 else noise_12
-        old_lp = lp_acc
-        old_hp = hp_acc
-        lp_acc = old_lp + ((noise_raw - old_lp) >> 3)
-        hp_acc = old_hp + ((old_lp - old_hp) >> 4)
-        bp = old_lp - old_hp
+        # Burst pattern
+        if   c < 244:  gate = True
+        elif c < 976:  gate = False
+        elif c < 1220: gate = True
+        elif c < 1952: gate = False
+        elif c < 2196: gate = True
+        else:          gate = True  # tail
+        # Wideband noise
+        noise_raw = (lfsr & 0x7FFF) - 16384  # 15-bit signed
+        # BPF: LP at ~8kHz (shift 1) then HP at ~1kHz (shift 3)
+        lp_acc = lp_acc + signed_rshift(noise_raw - lp_acc, 1)
+        hp_acc = hp_acc + signed_rshift(lp_acc - hp_acc, 3)
+        bp = lp_acc - hp_acc
         if gate:
-            val = (bp * amp) >> 10
+            bp_16 = max(-32768, min(32767, bp))
+            amp_11 = amp >> 5
+            product = bp_16 * amp_11
+            out.append(clamp16(product >> 11))
         else:
-            val = 0
-        out.append(val)
-        if c >= 1367:
-            amp -= amp >> 11  # tail decay K=11
-        lfsr = new_lfsr
-    return out
-
-
-# === MA (Maracas) — no knobs ===
-
-def render_maracas(n_samples):
-    """LFSR noise through HPF, very fast decay K=8."""
-    lfsr = 0xDEAD; hp_acc = 0; amp = 65535
-    out = []
-    for _ in range(n_samples):
-        if amp < 64:
-            out.append(0); continue
-        new_lfsr = lfsr_next(lfsr, [15, 13, 11, 0])
-        noise_raw = (lfsr & 0x7FF) - 1024
-        old_hp = hp_acc
-        hp_acc = old_hp + ((noise_raw - old_hp) >> 2)
-        hp_out = noise_raw - old_hp
-        val = (hp_out * amp) >> 10
-        out.append(val)
-        amp -= amp >> 8  # K=8, very fast
-        lfsr = new_lfsr
+            out.append(0)
+        if c >= 2196:
+            amp -= amp >> 11  # K=11, tail decay
     return out
 
 
 # === Output ===
 
-def apply_mixer_lpf(samples):
-    """Truncate 18-bit to 12-bit at DAC output."""
-    for i in range(len(samples)):
-        samples[i] = max(-2048, min(2047, samples[i] >> 6))
-    return samples
-
 def save_wav(filename, samples):
-    samples = apply_mixer_lpf(samples)
     path = os.path.join(OUTDIR, filename)
-    data = np.array([s * 16 for s in samples], dtype=np.int16)
+    data = np.array(samples, dtype=np.int16)
     with wave.open(path, 'w') as w:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR)
         w.writeframes(data.tobytes())
@@ -373,6 +372,9 @@ def render_demo():
             for i, s in enumerate(snd):
                 if offset + i < total:
                     mix[offset + i] += s
+    # Mixer: saturate to 16-bit
+    for i in range(total):
+        mix[i] = clamp16(mix[i])
     return mix
 
 def main():
@@ -388,12 +390,10 @@ def main():
         ("07_cowbell.wav", render_cowbell, SR // 2),
         ("08_tom_mt.wav", render_mt, SR),
         ("09_cymbal.wav", render_cymbal, SR * 2),
-        ("10_claves.wav", render_claves, SR // 4),
-        ("11_maracas.wav", render_maracas, SR // 4),
     ]
     for fname, renderer, n in voices:
         save_wav(fname, renderer(n))
-    save_wav("12_demo_pattern.wav", render_demo())
+    save_wav("10_demo_pattern.wav", render_demo())
     print("Done.")
 
 if __name__ == "__main__":

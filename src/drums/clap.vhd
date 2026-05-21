@@ -8,7 +8,7 @@ entity clap is
     rst         : in  std_logic;
     sample_tick : in  std_logic;
     trigger     : in  std_logic;
-    audio_out   : out signed(11 downto 0)
+    audio_out   : out signed(15 downto 0)
   );
 end entity clap;
 
@@ -23,7 +23,7 @@ begin
   process(clk)
     variable noise_raw : signed(15 downto 0);
     variable bp_out : signed(15 downto 0);
-    variable product : signed(23 downto 0);
+    variable product : signed(27 downto 0);
     variable c : integer;
     variable gate : std_logic;
   begin
@@ -53,14 +53,14 @@ begin
           end if;
 
           -- Bandpass filtered noise (~1000Hz)
-          noise_raw := resize(signed(lfsr(11 downto 0)), 16);
+          noise_raw := shift_left(resize(signed(lfsr(11 downto 0)), 16), 3);
           lp_acc <= lp_acc + shift_right(noise_raw - lp_acc, 3);
           hp_acc <= hp_acc + shift_right(lp_acc - hp_acc, 4);
           bp_out := lp_acc - hp_acc;
 
           if gate = '1' then
-            product := bp_out(15 downto 4) * signed('0' & amp(15 downto 5));
-            audio_out <= product(22 downto 11);
+            product := bp_out * signed('0' & amp(15 downto 5));
+            audio_out <= product(26 downto 11);
           else
             audio_out <= (others => '0');
           end if;

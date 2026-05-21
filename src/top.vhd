@@ -75,9 +75,9 @@ architecture rtl of top is
   signal lt_tuning_r, mt_tuning_r, ht_tuning_r : unsigned(7 downto 0);
   signal cy_tone_r, cy_decay_r, oh_decay_r : unsigned(7 downto 0);
 
-  -- Audio voices (12-bit signed)
-  signal audio_bd, audio_sd, audio_lt, audio_mt, audio_ht : signed(11 downto 0);
-  signal audio_rs, audio_cp, audio_cb, audio_cy, audio_oh, audio_ch : signed(11 downto 0);
+  -- Audio voices (16-bit signed)
+  signal audio_bd, audio_sd, audio_lt, audio_mt, audio_ht : signed(15 downto 0);
+  signal audio_rs, audio_cp, audio_cb, audio_cy, audio_oh, audio_ch : signed(15 downto 0);
   signal mix_out : unsigned(11 downto 0);
 
   -- PS/2

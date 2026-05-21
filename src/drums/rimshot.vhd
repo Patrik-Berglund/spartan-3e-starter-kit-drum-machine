@@ -8,7 +8,7 @@ entity rimshot is
     rst         : in  std_logic;
     sample_tick : in  std_logic;
     trigger     : in  std_logic;
-    audio_out   : out signed(11 downto 0)
+    audio_out   : out signed(15 downto 0)
   );
 end entity rimshot;
 
@@ -44,7 +44,7 @@ begin
   s3 <= SINE(to_integer(ph3(15 downto 10)));
 
   process(clk)
-    variable mix : signed(12 downto 0);
+    variable mix : signed(13 downto 0);
     variable product : signed(23 downto 0);
   begin
     if rising_edge(clk) then
@@ -64,13 +64,12 @@ begin
           ph2 <= ph2 + to_unsigned(912, 16);
           ph3 <= ph3 + to_unsigned(1368, 16);
 
-          -- Sum 3 sines, divide by 4
-          mix := resize(shift_right(s1, 2), 13) + resize(shift_right(s2, 2), 13) +
-                 resize(shift_right(s3, 2), 13);
+          -- Sum 3 sines
+          mix := resize(s1, 14) + resize(s2, 14) + resize(s3, 14);
 
           -- Apply amplitude
-          product := mix(11 downto 0) * signed('0' & amp(15 downto 5));
-          audio_out <= product(22 downto 11);
+          product := resize(mix, 12) * signed('0' & amp(15 downto 5));
+          audio_out <= product(22 downto 7);
 
           -- Very fast exponential decay K=8 (tau ~5ms)
           amp <= amp - ("00000000" & amp(15 downto 8));

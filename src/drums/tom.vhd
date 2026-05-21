@@ -12,7 +12,7 @@ entity tom is
     sample_tick : in  std_logic;
     trigger     : in  std_logic;
     tuning      : in  unsigned(7 downto 0);
-    audio_out   : out signed(11 downto 0)
+    audio_out   : out signed(15 downto 0)
   );
 end entity tom;
 
@@ -79,7 +79,7 @@ begin
 
           -- Sine * amplitude
           product := sine_val * signed('0' & amp(15 downto 5));
-          audio_out <= product(22 downto 11);
+          audio_out <= product(22 downto 7);
 
           -- Exponential decay K=12 (tau ~84ms)
           amp <= amp - ("000000000000" & amp(15 downto 12));

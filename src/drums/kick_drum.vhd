@@ -10,7 +10,7 @@ entity kick_drum is
     trigger     : in  std_logic;
     tone        : in  unsigned(7 downto 0);
     decay       : in  unsigned(7 downto 0);
-    audio_out   : out signed(11 downto 0)
+    audio_out   : out signed(15 downto 0)
   );
 end entity kick_drum;
 
@@ -19,7 +19,6 @@ architecture rtl of kick_drum is
   signal freq     : unsigned(15 downto 0) := (others => '0');
   signal amp      : unsigned(15 downto 0) := (others => '0');
   signal active   : std_logic := '0';
-  signal div      : unsigned(2 downto 0) := (others => '0');
 
   -- Sine table interface
   signal sine_val : signed(11 downto 0);
@@ -47,6 +46,8 @@ begin
   process(clk)
     variable product : signed(23 downto 0);
     variable shift_amt : integer;
+    variable diff : unsigned(15 downto 0);
+    variable step : unsigned(15 downto 0);
   begin
     if rising_edge(clk) then
       if rst = '1' then
@@ -61,22 +62,25 @@ begin
           phase <= (others => '0');
           freq <= start_freq;
           amp <= to_unsigned(65535, 16);
-          div <= (others => '0');
         end if;
 
         if sample_tick = '1' and active = '1' then
           phase <= phase + freq;
-          div <= div + 1;
 
-          -- Pitch sweep down to end freq (68) every 7 samples
-          if div = "110" and freq > 68 then
-            freq <= freq - 1;
-            div <= (others => '0');
+          -- Exponential pitch sweep: freq -= (freq - freq_end) >> 4
+          if freq > 68 then
+            diff := freq - to_unsigned(68, 16);
+            step := "0000" & diff(15 downto 4);
+            if step < 1 then
+              freq <= freq - 1;
+            else
+              freq <= freq - step;
+            end if;
           end if;
 
           -- Amplitude modulation: sine * amp(15:5)
           product := sine_val * signed('0' & amp(15 downto 5));
-          audio_out <= product(22 downto 11);
+          audio_out <= product(22 downto 7);
 
           -- Exponential decay: amp -= amp >> K
           shift_amt := to_integer(decay_k);
