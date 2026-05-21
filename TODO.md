@@ -51,6 +51,7 @@ and the reference samples in docs/TR808WAV/ to A/B compare.
 
 ### Next: Quality Gap (sounds "C64-like")
 - [ ] **Metallic voices use higher-resolution source waveforms** — current 6 square oscillators produce only 7 amplitude levels (3-bit effective). Use full 16-bit phase accumulator (triangle/saw) per oscillator to get rich beating patterns before BPF. Model in sim_vhdl.py first.
+- [ ] **Explore FM synthesis for metallic voices** — two sine oscillators with non-harmonic FM ratios naturally produce rich metallic spectra (like real cymbal/hihat). No need for 6 crude squares + aggressive filtering. We already have the sine table. Could replace the entire metallic voice topology. Start with sim_ideal.py prototype comparing FM metallic vs current approach.
 - [ ] Snare LFSR noise is 1-bit — consider multi-bit noise source
 - [ ] Cowbell BPF Q still too wide (sounds "Mario")
 - [ ] Clap envelope timing needs tuning against reference
