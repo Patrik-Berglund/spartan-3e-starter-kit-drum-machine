@@ -37,13 +37,28 @@
 
 ## Sound Refinements (IN PROGRESS)
 The voices work but don't yet match the real 808 character. Use sim_vhdl.py vs sim_ideal.py
-and the reference samples at https://audio.com/drum-machine/collections/roland-tr-808 to A/B compare.
+and the reference samples in docs/TR808WAV/ to A/B compare.
 
-Known gaps:
-- [ ] Kick still sounds more like a sub sweep than a punchy thump (needs faster pitch sweep, shorter decay at default)
-- [ ] Cowbell sounds too "Mario" (bandpass Q needs tuning)
-- [ ] Clap noise is still harsh (bandpass too wide?)
-- [ ] Rimshot needs frequency/decay tuning against reference
-- [ ] Overall mix balance: hats too loud relative to kick
+### Completed
+- [x] Signal chain widened: 16-bit voices → 21-bit mixer → 12-bit DAC
+- [x] First-order noise shaping at DAC output (+12dB in-band SNR)
+- [x] Metallic voices: proper BPF (1-stage LP + 4-stage HP cascade, centroid ~7kHz)
+- [x] Snare noise: 2-stage LP + HP bandpass
+- [x] Kick: exponential pitch sweep
+- [x] Correct 808 oscillator frequencies (205, 304, 370, 523, 540, 800 Hz)
+- [x] sq width bugs fixed (cowbell 4-bit, hihats/cymbal 5-bit)
+- [x] Full 16-bit multiply for filtered voices (no 12-bit truncation before multiply)
+
+### Next: Quality Gap (sounds "C64-like")
+- [ ] **Metallic voices use higher-resolution source waveforms** — current 6 square oscillators produce only 7 amplitude levels (3-bit effective). Use full 16-bit phase accumulator (triangle/saw) per oscillator to get rich beating patterns before BPF. Model in sim_vhdl.py first.
+- [ ] Snare LFSR noise is 1-bit — consider multi-bit noise source
+- [ ] Cowbell BPF Q still too wide (sounds "Mario")
+- [ ] Clap envelope timing needs tuning against reference
+- [ ] Overall mix balance tuning
 - [ ] Consider 2× oversampling (SPI headroom available at 12.5MHz)
-- [ ] External RC filter on J5 output (10nF cap) would help significantly
+
+### Future: Audio Capture Buffer
+- [ ] BRAM capture buffer (4-8 BRAMs = 84-168ms of audio)
+- [ ] Configurable source: mixer output or individual voice (0-11)
+- [ ] UART dump command to download captured audio to PC
+- [ ] Python script to receive and save as WAV for comparison
