@@ -81,8 +81,11 @@ begin
           product := sine_val * signed('0' & amp(15 downto 5));
           audio_out <= product(22 downto 7);
 
-          -- Exponential decay K=12 (tau ~84ms)
-          amp <= amp - ("000000000000" & amp(15 downto 12));
+          -- Exponential decay K=12 (tau ~84ms). Force to 0 once the decay
+          -- term itself is 0 -- K=12 floor is 4096, above the old amp<64
+          -- threshold, so amp would get permanently stuck without this.
+          if amp(15 downto 12) = "0000" then amp <= (others => '0');
+          else amp <= amp - ("000000000000" & amp(15 downto 12)); end if;
           if amp < 64 then
             active <= '0';
           end if;

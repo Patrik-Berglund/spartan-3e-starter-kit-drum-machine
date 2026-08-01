@@ -82,14 +82,30 @@ begin
           product := sine_val * signed('0' & amp(15 downto 5));
           audio_out <= product(22 downto 7);
 
-          -- Exponential decay: amp -= amp >> K
+          -- Exponential decay: amp -= amp >> K. Once amp drops below 2^K,
+          -- the shift produces 0 and amp would get permanently stuck
+          -- (never reaching the amp<64 stop condition below) -- confirmed
+          -- analytically: decay_k up to 14 gives a floor of 16384, far
+          -- above the old threshold of 64, so kick would never actually
+          -- go inactive once triggered, continuously contributing to the
+          -- mixer. Fix: force amp to 0 once the decay term itself is 0.
           shift_amt := to_integer(decay_k);
           case shift_amt is
-            when 10 => amp <= amp - ("0000000000" & amp(15 downto 10));
-            when 11 => amp <= amp - ("00000000000" & amp(15 downto 11));
-            when 12 => amp <= amp - ("000000000000" & amp(15 downto 12));
-            when 13 => amp <= amp - ("0000000000000" & amp(15 downto 13));
-            when others => amp <= amp - ("00000000000000" & amp(15 downto 14));
+            when 10 =>
+              if amp(15 downto 10) = "000000" then amp <= (others => '0');
+              else amp <= amp - ("0000000000" & amp(15 downto 10)); end if;
+            when 11 =>
+              if amp(15 downto 11) = "00000" then amp <= (others => '0');
+              else amp <= amp - ("00000000000" & amp(15 downto 11)); end if;
+            when 12 =>
+              if amp(15 downto 12) = "0000" then amp <= (others => '0');
+              else amp <= amp - ("000000000000" & amp(15 downto 12)); end if;
+            when 13 =>
+              if amp(15 downto 13) = "000" then amp <= (others => '0');
+              else amp <= amp - ("0000000000000" & amp(15 downto 13)); end if;
+            when others =>
+              if amp(15 downto 14) = "00" then amp <= (others => '0');
+              else amp <= amp - ("00000000000000" & amp(15 downto 14)); end if;
           end case;
 
           if amp < 64 then

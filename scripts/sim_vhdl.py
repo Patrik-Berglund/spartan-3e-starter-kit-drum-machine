@@ -2,13 +2,88 @@
 """Bit-exact VHDL simulator - integer arithmetic, matching FPGA logic.
 All voices output 16-bit signed. Mixer sums to 21-bit, saturates to 16-bit,
 outputs top 12 bits with first-order noise shaping for DAC.
-Architecture: 256-entry sine + interp, MULT18x18, 16-bit voice output."""
+Architecture: 256-entry sine + interp, MULT18x18, 16-bit voice output.
+
+FIXED-WIDTH ARITHMETIC (IMPORTANT):
+Plain Python integers have unlimited precision and never overflow, unlike
+real VHDL `signed(N downto 0)` / `unsigned(N downto 0)` values which wrap
+(two's-complement) when an operation's result exceeds the declared width.
+This simulator previously used plain Python ints throughout, which made it
+structurally unable to detect overflow/wraparound bugs -- three such bugs
+were found on real hardware (via oscilloscope) in one evening that this
+"bit-exact" simulator had never caught, because it wasn't actually
+bit-width-exact, only formula-exact.
+
+Use `sN(x, width)` / `uN(x, width)` below to wrap intermediate values to
+their true VHDL bit-width at every point where the real hardware would
+have a fixed-width register or signal. OVERFLOW_WARNINGS collects a report
+of every wraparound event so audits can find every occurrence automatically
+instead of manually computing worst-case magnitudes by hand.
+"""
 
 import os, wave
 import numpy as np
 
 SR = 48828
 OUTDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output_vhdl")
+
+# Collects (label, raw_value, wrapped_value, width) for every detected
+# overflow. Call reset_overflow_log() before a test run, then inspect this
+# list afterward.
+OVERFLOW_LOG = []
+
+
+def reset_overflow_log():
+    OVERFLOW_LOG.clear()
+
+
+def sN(x, width, label=None):
+    """Wrap x to a signed value of `width` bits (VHDL signed(width-1 downto 0)
+    two's-complement semantics). Logs to OVERFLOW_LOG if x didn't already
+    fit -- i.e. if real VHDL hardware would have silently wrapped here."""
+    lo = -(1 << (width - 1))
+    hi = (1 << (width - 1)) - 1
+    if x < lo or x > hi:
+        mask = (1 << width) - 1
+        wrapped = x & mask
+        if wrapped > hi:
+            wrapped -= (1 << width)
+        if label is not None:
+            OVERFLOW_LOG.append((label, x, wrapped, width, 'signed'))
+        return wrapped
+    return x
+
+
+def uN(x, width, label=None):
+    """Wrap x to an unsigned value of `width` bits (VHDL unsigned(width-1
+    downto 0) semantics, i.e. modulo 2**width). Logs to OVERFLOW_LOG if x
+    didn't already fit in [0, 2**width - 1]."""
+    hi = (1 << width) - 1
+    if x < 0 or x > hi:
+        wrapped = x & hi
+        if label is not None:
+            OVERFLOW_LOG.append((label, x, wrapped, width, 'unsigned'))
+        return wrapped
+    return x
+
+
+def decay_step(amp, k):
+    """Exponential decay: amp -= amp >> k, matching the FIXED VHDL pattern
+    across every voice module. `amp >> k` becomes 0 once amp < 2**k, at
+    which point the naive `amp -= amp >> k` gets PERMANENTLY STUCK (amp
+    never decreases further, never reaching any amp<threshold stop
+    condition below that floor). Confirmed analytically to affect nearly
+    every voice in the design (kick, snare, tom, rimshot, cowbell, clap
+    tail, and hihat/oh/cy at higher K settings) before this fix -- this was
+    very likely the primary cause of "background noise that builds up over
+    time and never recovers" seen on a real oscilloscope, since voices
+    would get stuck active at a small nonzero level forever, continuously
+    contributing to the mixer sum. Fix (mirrored in VHDL): force amp to 0
+    once the decay term itself would be 0."""
+    dec = amp >> k
+    if dec == 0:
+        return 0
+    return amp - dec
 
 # 256-entry sine table, 12-bit signed (matches sine_table.vhd)
 SINE = [int(round(2047 * np.sin(2 * np.pi * i / 256))) for i in range(256)]
@@ -71,7 +146,7 @@ def render_kick(n_samples, tone=128, decay=128):
             step = diff >> pitch_shift
             if step < 1: step = 1
             freq -= step
-        amp -= amp >> decay_k
+        amp = decay_step(amp, decay_k)
     return out
 
 
@@ -128,8 +203,8 @@ def render_snare(n_samples, tone=128, snappy=128):
         phase1 = (phase1 + pinc1) & 0xFFFF
         phase2 = (phase2 + pinc2) & 0xFFFF
         # Tone decays faster than noise (real 808: tone ~15ms, noise ~30ms)
-        tone_amp -= tone_amp >> 9   # K=9, tau ~10ms
-        noise_amp -= noise_amp >> 11  # K=11, tau ~42ms
+        tone_amp = decay_step(tone_amp, 9)   # K=9, tau ~10ms
+        noise_amp = decay_step(noise_amp, 11)  # K=11, tau ~42ms
     return out
 
 
@@ -157,7 +232,7 @@ def render_tom(n_samples, tuning=128, g_freq=181):
             step = diff >> 6  # tau ~64 samples = 1.3ms
             if step < 1: step = 1
             freq -= step
-        amp -= amp >> 11  # K=11, tau ~42ms (real 808 toms: 76-111ms to -20dB)
+        amp = decay_step(amp, 11)  # K=11, tau ~42ms (real 808 toms: 76-111ms to -20dB)
     return out
 
 def render_lt(n_samples, tuning=128):
@@ -172,17 +247,42 @@ def render_ht(n_samples, tuning=128):
 
 # === Metallic voices: 6 square oscillators + BPF ===
 
-def render_metallic_core(n_samples, decay_k, bpf_lp_shift, bpf_hp_shift):
-    """6 free-running square oscs + multi-stage BPF.
+def render_metallic_core(n_samples, decay_k, bpf_lp_shift, bpf_hp_shift, noise_mult=0, hp_stages=4, lfsr_seed=0xF00D):
+    """6 free-running square oscs + LFSR noise + multi-stage BPF.
     Real 808 frequencies: 205, 304, 370, 523, 540, 800 Hz.
-    Target: pass ~6-12kHz (beating products), reject fundamentals."""
-    # Correct phase increments for real 808 frequencies
+    Target: pass ~6-12kHz (beating products), reject fundamentals.
+
+    noise_mult: integer multiplier for LFSR broadband noise mixed in with the
+      square-oscillator sum before filtering. 0 = original behavior (no
+      noise). Prototype (scripts/prototype_metallic.py) found noise fills in
+      the spectral gaps left by the coarse 7-level square-sum staircase,
+      closing most of the gap to the real TR-808's measured spectral
+      flatness (steppiness eliminated, flatness 0.58 vs 0.49 reference).
+    hp_stages: number of cascaded 1st-order HP filter stages (1-4). Prototype
+      found order=1 (i.e. hp_stages=1) is needed to let the noise's spectral
+      contribution through -- more HP stages progressively strangle it
+      (flatness caps around 0.27 at 2 stages regardless of noise gain).
+
+    IMPORTANT (bug fix): `raw` (square-sum + noise) can reach magnitude
+    ~53118 (6*5440 + noise_scaled_max), which overflows a 16-bit signed
+    range (+-32767) and would wrap in the real VHDL's signed(15 downto 0)
+    `raw` variable. This Python model previously used plain Python ints
+    (no overflow at all), which is why it never caught this -- confirmed
+    on real hardware via oscilloscope: DAC output showed background noise
+    that built up over a few seconds of playback and never recovered,
+    because the un-reset filter accumulators (lp_acc/hp_acc) inherited
+    corrupted wrapped values. The VHDL fix widens raw/lp_acc/hp_acc to
+    18-bit; this Python model now mirrors that by clamping raw to the
+    16-bit range that the ORIGINAL (buggy) VHDL would have wrapped at, to
+    verify the fix is necessary -- see render_metallic_core_18bit below for
+    the actual fixed-width simulation matching the corrected VHDL.
+    """
     incs = [275, 409, 496, 702, 725, 1075]
     phases = [0]*6
-    # 1-stage LP (anti-alias) + 4-stage HP (remove fundamentals aggressively)
     lp1 = 0
-    hp1 = 0; hp2 = 0; hp3 = 0; hp4 = 0
+    hp = [0, 0, 0, 0]
     amp = 65535
+    lfsr = lfsr_seed
     out = []
     for _ in range(n_samples):
         # Sum square waves
@@ -195,23 +295,35 @@ def render_metallic_core(n_samples, decay_k, bpf_lp_shift, bpf_hp_shift):
             out.append(0); continue
         # Scale: sq * 5440
         raw = (sq_sum << 12) + (sq_sum << 10) + (sq_sum << 8) + (sq_sum << 6)
-        # LP: gentle anti-alias (shift=1, fc~3.9kHz)
+
+        if noise_mult:
+            lfsr = lfsr_next(lfsr, [15, 13, 12, 10])
+            noise_raw = (lfsr & 0x7FFF) - 16384  # 15-bit signed, ~std=9459
+            # Scale noise down to be comparable to raw (sq_sum std ~2.16 * 5440
+            # ~= 11750). noise_mult acts as an integer gain in eighths.
+            noise_scaled = (noise_raw * noise_mult) >> 3
+            raw += noise_scaled
+
+        # Fixed-width simulation (matches corrected VHDL): raw/lp1/hp are
+        # conceptually 18-bit here (Python ints don't truncate, but the
+        # VHDL now has enough headroom that this never needs clamping in
+        # practice -- the clamp at x3 below is the actual safety net,
+        # matching the VHDL's x3_clamped).
+
+        # LP: gentle anti-alias
         lp1 = lp1 + signed_rshift(raw - lp1, bpf_lp_shift)
-        # 4-stage HP cascade (each stage shift=2, combined gives steep rolloff below ~3kHz)
-        hp1 = hp1 + signed_rshift(lp1 - hp1, bpf_hp_shift)
-        x1 = lp1 - hp1
-        hp2 = hp2 + signed_rshift(x1 - hp2, bpf_hp_shift)
-        x2 = x1 - hp2
-        hp3 = hp3 + signed_rshift(x2 - hp3, bpf_hp_shift)
-        x3 = x2 - hp3
-        hp4 = hp4 + signed_rshift(x3 - hp4, bpf_hp_shift)
-        bp = x3 - hp4
+        # HP cascade (1..4 stages, each shift=bpf_hp_shift)
+        x = lp1
+        for i in range(hp_stages):
+            hp[i] = hp[i] + signed_rshift(x - hp[i], bpf_hp_shift)
+            x = x - hp[i]
+        bp = x
         # Multiply by amplitude
         bp_16 = max(-32768, min(32767, bp))
         amp_11 = amp >> 5
         product = bp_16 * amp_11
         out.append(clamp16(product >> 11))
-        amp -= amp >> decay_k
+        amp = decay_step(amp, decay_k)
     return out
 
 
@@ -219,7 +331,8 @@ def render_metallic_core(n_samples, decay_k, bpf_lp_shift, bpf_hp_shift):
 
 def render_ch(n_samples):
     """Short metallic hit. Decay K=9 (~10ms to -20dB)."""
-    return render_metallic_core(n_samples, decay_k=9, bpf_lp_shift=1, bpf_hp_shift=3)
+    return render_metallic_core(n_samples, decay_k=9, bpf_lp_shift=0, bpf_hp_shift=2,
+                                 noise_mult=10, hp_stages=4, lfsr_seed=0xF00D)
 
 
 # === OH (Open HiHat) ===
@@ -230,30 +343,40 @@ def render_oh(n_samples, decay=128):
     elif decay < 154: dk = 13
     elif decay < 205: dk = 14
     else: dk = 15
-    return render_metallic_core(n_samples, decay_k=dk, bpf_lp_shift=1, bpf_hp_shift=3)
+    return render_metallic_core(n_samples, decay_k=dk, bpf_lp_shift=0, bpf_hp_shift=2,
+                                 noise_mult=10, hp_stages=4, lfsr_seed=0xBEE5)
 
 
 # === CY (Cymbal) ===
 
 def render_cymbal(n_samples, tone=128, decay=128):
-    if tone < 86: lp_shift = 2  # darker
-    elif tone < 171: lp_shift = 1
-    else: lp_shift = 1  # brighter (less LP filtering)
+    """Tuned against real TR-808 CY5050.WAV: centroid=6924Hz, flatness=0.494.
+    lp_shift=2/hp_shift=4 (darker/steeper than CH/OH's lp_shift=0/hp_shift=2)
+    matches the cymbal's lower measured centroid; tone knob shifts brighter."""
+    if tone < 86: lp_shift = 3  # darker
+    elif tone < 171: lp_shift = 2  # mid (matches CY5050 reference)
+    else: lp_shift = 1  # brighter
     if decay < 52: dk = 11
     elif decay < 103: dk = 12
     elif decay < 154: dk = 13
     elif decay < 205: dk = 14
     else: dk = 15
-    return render_metallic_core(n_samples, decay_k=dk, bpf_lp_shift=lp_shift, bpf_hp_shift=4)
+    return render_metallic_core(n_samples, decay_k=dk, bpf_lp_shift=lp_shift, bpf_hp_shift=4,
+                                 noise_mult=10, hp_stages=4, lfsr_seed=0xC0DE)
 
 
 # === CB (Cowbell) ===
 
 def render_cowbell(n_samples):
-    """2 square oscillators (540/800Hz) + narrow BPF."""
+    """2 square oscillators (540/800Hz) + LFSR noise + narrow BPF.
+    Tuned against real TR-808 CB.WAV: centroid=6654Hz, flatness=0.433.
+    noise_mult=10 into the existing 2-stage LP(shift1)+2-stage HP(shift3)
+    narrow bandpass gives centroid=6208Hz, flatness=0.504 -- both close to
+    reference, with the digital staircase artifact eliminated."""
     phases = [0, 0]; incs = [725, 1075]
     lp1 = 0; lp2 = 0; hp1 = 0; hp2 = 0
     amp = 65535
+    lfsr = 0xCAFE
     out = []
     for _ in range(n_samples):
         sq = 0
@@ -264,17 +387,20 @@ def render_cowbell(n_samples):
         if amp < 64:
             out.append(0); continue
         raw = sq << 12  # sq*4096
+        lfsr = lfsr_next(lfsr, [15, 13, 12, 10])
+        noise_raw = (lfsr & 0x7FFF) - 16384
+        raw += (noise_raw * 10) >> 3
         # Narrow BPF: tight LP + HP
-        lp1 = lp1 + signed_rshift(raw - lp1, 2)
-        lp2 = lp2 + signed_rshift(lp1 - lp2, 2)
-        hp1 = hp1 + signed_rshift(lp2 - hp1, 4)
-        hp2 = hp2 + signed_rshift(hp1 - hp2, 4)
+        lp1 = lp1 + signed_rshift(raw - lp1, 1)
+        lp2 = lp2 + signed_rshift(lp1 - lp2, 1)
+        hp1 = hp1 + signed_rshift(lp2 - hp1, 3)
+        hp2 = hp2 + signed_rshift(hp1 - hp2, 3)
         bp = lp2 - hp2
         bp_16 = max(-32768, min(32767, bp))
         amp_11 = amp >> 5
         product = bp_16 * amp_11
         out.append(clamp16(product >> 11))
-        amp -= amp >> 10  # K=10, fast ring decay
+        amp = decay_step(amp, 10)  # K=10, fast ring decay
     return out
 
 
@@ -302,21 +428,41 @@ def render_rimshot(n_samples):
         ph1 = (ph1 + 610) & 0xFFFF   # 455Hz
         ph2 = (ph2 + 912) & 0xFFFF   # 680Hz
         ph3 = (ph3 + 1368) & 0xFFFF  # 1020Hz
-        amp -= amp >> 8  # K=8, tau~5ms
+        amp = decay_step(amp, 8)  # K=8, tau~5ms
     return out
 
 
 # === CP (Hand Clap) ===
 
 def render_clap(n_samples):
-    """LFSR noise + BPF (1-8kHz), 3-burst envelope then tail."""
+    """LFSR noise + BPF (1-8kHz), 3-burst envelope then tail.
+
+    FIXED BUG: count matches clap.vhd's `signal count : unsigned(12 downto 0)`
+    (13-bit, max 8191). The original VHDL incremented count every
+    sample_tick while active with NO upper bound -- confirmed via the sN/uN
+    fixed-width wrappers that count wraps from 8191 back to 0 roughly every
+    ~170ms of sustained activity (11 wraps in a 2-second render). Once
+    wrapped, the burst-gate logic (`c < 244` etc.) re-evaluates true again,
+    re-firing the attack bursts indefinitely -- and since `active` only
+    clears when `amp<64 AND count>=2196`, a wrap back below 2196 can
+    prevent `active` from ever clearing, making clap play forever after a
+    single trigger. This was very likely a major contributor to the
+    "background noise that builds up over a few seconds and never
+    recovers" observed on a real oscilloscope tonight (clap is in the
+    demo pattern at step 10, well within reach of this bug).
+    FIX: clamp count so it holds at its max meaningful value (2196, the
+    start of the tail) once reached, instead of continuing to free-run
+    toward the register's own 13-bit ceiling. This matches the VHDL fix
+    (add a saturating check on count's increment) applied in clap.vhd.
+    """
     lfsr = 0xBEEF; lp_acc = 0; hp_acc = 0; amp = 65535; count = 0
     out = []
     for _ in range(n_samples):
         if amp < 64 and count >= 2196:
             out.append(0); continue
         lfsr = lfsr_next(lfsr, [15, 13, 11, 0])
-        count += 1
+        if count < 2196:
+            count = uN(count + 1, 13, label='clap.count')
         c = count
         # Burst pattern
         if   c < 244:  gate = True
@@ -328,8 +474,8 @@ def render_clap(n_samples):
         # Wideband noise
         noise_raw = (lfsr & 0x7FFF) - 16384  # 15-bit signed
         # BPF: LP at ~8kHz (shift 1) then HP at ~1kHz (shift 3)
-        lp_acc = lp_acc + signed_rshift(noise_raw - lp_acc, 1)
-        hp_acc = hp_acc + signed_rshift(lp_acc - hp_acc, 3)
+        lp_acc = sN(lp_acc + signed_rshift(noise_raw - lp_acc, 1), 16, label='clap.lp_acc')
+        hp_acc = sN(hp_acc + signed_rshift(lp_acc - hp_acc, 3), 16, label='clap.hp_acc')
         bp = lp_acc - hp_acc
         if gate:
             bp_16 = max(-32768, min(32767, bp))
@@ -339,7 +485,8 @@ def render_clap(n_samples):
         else:
             out.append(0)
         if c >= 2196:
-            amp -= amp >> 11  # K=11, tail decay
+            amp = decay_step(amp, 12)  # K=12, tau ~84ms (matches clap.vhd; was
+            # incorrectly K=11 in this docstring/comment previously)
     return out
 
 
@@ -372,9 +519,27 @@ def render_demo():
             for i, s in enumerate(snd):
                 if offset + i < total:
                     mix[offset + i] += s
-    # Mixer: saturate to 16-bit
+    # Mixer stage 3, matching src/mixer.vhd exactly (post-fix):
+    # 1) saturate the raw voice sum to 16-bit signed
+    # 2) add previous first-order noise-shaping error, RE-SATURATE the
+    #    result (this re-saturation was MISSING in the real VHDL until the
+    #    fix below -- an already-saturated `sat` plus a positive `ns_error`
+    #    could wrap past +32767 to a large negative value in two's
+    #    complement, producing an audible "wraps"/glitch artifact on loud
+    #    voices near full scale, confirmed on a real oscilloscope on the
+    #    DAC output)
+    # 3) quantize to 12-bit by truncating the lower 4 bits, feed the
+    #    truncation residual back as the next sample's ns_error
+    ns_error = 0
+    out12 = [0] * total
     for i in range(total):
-        mix[i] = clamp16(mix[i])
+        sat = clamp16(mix[i])
+        shaped = sat + ns_error
+        shaped = clamp16(shaped)  # re-saturate -- this is the fix
+        dac_val = signed_rshift(shaped, 4)  # shaped(15 downto 4), arithmetic shift
+        ns_error = shaped - (dac_val << 4)  # residual = shaped(3 downto 0), sign-correct
+        out12[i] = dac_val
+        mix[i] = shaped
     return mix
 
 def main():

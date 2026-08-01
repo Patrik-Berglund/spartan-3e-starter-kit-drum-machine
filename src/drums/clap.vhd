@@ -40,7 +40,21 @@ begin
 
         if sample_tick = '1' and active = '1' then
           lfsr <= lfsr(14 downto 0) & (lfsr(15) xor lfsr(13) xor lfsr(11) xor lfsr(0));
-          count <= count + 1;
+          -- count is unsigned(12 downto 0), max 8191. Original code
+          -- incremented it unconditionally every sample_tick while active
+          -- with no upper bound -- confirmed (via scripts/sim_vhdl.py's
+          -- fixed-width wrappers) that it wraps from 8191 back to 0 after
+          -- ~170ms of sustained activity, which re-evaluates the burst
+          -- gate logic from the start (c<244 becomes true again) and
+          -- RE-FIRES the attack bursts without any new trigger -- and
+          -- since `active` only clears when amp<64 AND count>=2196, a
+          -- wrap back below 2196 could prevent `active` from ever
+          -- clearing. Fix: hold count at 2196 (start of tail) once
+          -- reached, instead of letting it free-run toward the register's
+          -- 13-bit ceiling.
+          if count < 2196 then
+            count <= count + 1;
+          end if;
           c := to_integer(count);
 
           -- Burst pattern per service manual Figure 13
@@ -65,9 +79,14 @@ begin
             audio_out <= (others => '0');
           end if;
 
-          -- Exponential decay only during tail K=12 (tau ~84ms)
+          -- Exponential decay only during tail K=12 (tau ~84ms). Force to
+          -- 0 once the decay term itself is 0 -- K=12 floor is 4096, above
+          -- the old amp<64 threshold, so amp would get permanently stuck
+          -- without this (compounding with the count wraparound bug above
+          -- to make clap play forever after a single trigger).
           if c >= 2196 then
-            amp <= amp - ("000000000000" & amp(15 downto 12));
+            if amp(15 downto 12) = "0000" then amp <= (others => '0');
+            else amp <= amp - ("000000000000" & amp(15 downto 12)); end if;
             if amp < 64 then active <= '0'; end if;
           end if;
         elsif active = '0' then

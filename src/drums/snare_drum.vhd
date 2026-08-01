@@ -134,9 +134,15 @@ begin
           else audio_out <= mix(15 downto 0);
           end if;
 
-          -- Exponential decay: tone K=9, noise K=11
-          tone_amp <= tone_amp - ("000000000" & tone_amp(15 downto 9));
-          noise_amp <= noise_amp - ("00000000000" & noise_amp(15 downto 11));
+          -- Exponential decay: tone K=9, noise K=11. Force to 0 once the
+          -- decay term itself is 0 (see kick_drum.vhd comment for why --
+          -- K=9/K=11 floors of 512/2048 are both above the old amp<64
+          -- threshold, so both amps would get permanently stuck without
+          -- this fix).
+          if tone_amp(15 downto 9) = "0000000" then tone_amp <= (others => '0');
+          else tone_amp <= tone_amp - ("000000000" & tone_amp(15 downto 9)); end if;
+          if noise_amp(15 downto 11) = "00000" then noise_amp <= (others => '0');
+          else noise_amp <= noise_amp - ("00000000000" & noise_amp(15 downto 11)); end if;
 
           if tone_amp < 64 and noise_amp < 64 then active <= '0'; end if;
         elsif active = '0' then

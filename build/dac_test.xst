@@ -1,0 +1,17 @@
+set -tmpdir "xst/tmp_dac_test"
+set -xsthdpdir "xst_dac_test"
+run
+-ifn dac_test.prj
+-ofn dac_test.ngc
+-ifmt mixed
+-ofmt NGC
+-p xc3s500e-fg320-4
+-top dac_test
+-opt_mode Speed
+-opt_level 1
+-iuc NO
+-keep_hierarchy No
+-rtlview Yes
+-hierarchy_separator /
+-bus_delimiter <>
+-case Maintain

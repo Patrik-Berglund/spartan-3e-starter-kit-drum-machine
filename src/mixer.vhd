@@ -34,6 +34,7 @@ begin
   process(clk)
     variable sat : signed(15 downto 0);
     variable shaped : signed(15 downto 0);
+    variable shaped_wide : signed(16 downto 0);
     variable dac_val : signed(11 downto 0);
   begin
     if rising_edge(clk) then
@@ -60,8 +61,19 @@ begin
           elsif sum_total < -32768 then sat := to_signed(-32768, 16);
           else sat := sum_total(15 downto 0);
           end if;
-          -- First-order noise shaping: add previous error
-          shaped := sat + resize(ns_error, 16);
+          -- First-order noise shaping: add previous error. This addition
+          -- can push an already-saturated `sat` outside the 16-bit signed
+          -- range (e.g. 32767 + positive error wraps to a large negative
+          -- number in two's complement) -- re-saturate using a wider
+          -- intermediate to catch that before slicing to dac_val. This was
+          -- the root cause of the "wraps" artifact seen on the DAC output
+          -- on an oscilloscope: loud voices near full scale would overflow
+          -- here and flip to the opposite extreme instead of clipping.
+          shaped_wide := resize(sat, 17) + resize(ns_error, 17);
+          if shaped_wide > 32767 then shaped := to_signed(32767, 16);
+          elsif shaped_wide < -32768 then shaped := to_signed(-32768, 16);
+          else shaped := shaped_wide(15 downto 0);
+          end if;
           -- Quantize to 12-bit (truncate lower 4 bits)
           dac_val := shaped(15 downto 4);
           -- Update error: residual = shaped - reconstructed

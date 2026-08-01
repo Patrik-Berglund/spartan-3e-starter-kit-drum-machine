@@ -49,12 +49,30 @@ __pycache__/
 *:Zone.Identifier
 
 # Copyrighted reference materials (not for distribution)
-tr-808-manual.txt
-tr-808-panel.PNG
-service-manual.txt
-gemini-voices-desc.txt
-swing-type-vca.PNG
-t-network.PNG
-handclap.PNG
-voices1.PNG
-voices2.PNG
+docs/reference-text/tr-808-manual.txt
+docs/reference-images/tr-808-panel.PNG
+docs/reference-text/service-manual.txt
+docs/reference-text/gemini-voices-desc.txt
+docs/reference-images/swing-type-vca.PNG
+docs/reference-images/t-network.PNG
+docs/reference-images/handclap.PNG
+docs/reference-images/voices1.PNG
+docs/reference-images/voices2.PNG
+
+# Build artifacts for standalone dac_test target
+build/_ngo_dac_test/
+build/xst_dac_test/
+build/top_timing.twr
+build/dac_test.pcf
+build/dac_test.par
+build/dac_test.pad
+build/dac_test.drc
+build/dac_test.bgn
+build/dac_test.bld
+build/dac_test.unroutes
+build/dac_test_map.mrp
+build/dac_test_map.ngm
+
+# Prototype/comparison script outputs (regenerable, not source)
+scripts/output_prototype/
+scripts/output_compare/

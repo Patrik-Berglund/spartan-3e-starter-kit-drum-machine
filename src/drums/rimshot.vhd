@@ -71,8 +71,12 @@ begin
           product := resize(mix, 12) * signed('0' & amp(15 downto 5));
           audio_out <= product(22 downto 7);
 
-          -- Very fast exponential decay K=8 (tau ~5ms)
-          amp <= amp - ("00000000" & amp(15 downto 8));
+          -- Very fast exponential decay K=8 (tau ~5ms). Force to 0 once
+          -- the decay term itself is 0 -- K=8 floor is 256, above the old
+          -- amp<64 threshold, so amp would get permanently stuck without
+          -- this.
+          if amp(15 downto 8) = "00000000" then amp <= (others => '0');
+          else amp <= amp - ("00000000" & amp(15 downto 8)); end if;
           if amp < 64 then active <= '0'; audio_out <= (others => '0');
           end if;
         elsif active = '0' then

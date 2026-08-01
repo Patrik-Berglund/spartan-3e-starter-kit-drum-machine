@@ -1,0 +1,39 @@
+# =============================================================================
+# DAC/SPI standalone test harness - Pin Constraints
+# Board: Xilinx Spartan-3E Starter Kit (XC3S500E-FG320-4)
+# Subset of top.ucf: only pins used by dac_test.vhd.
+# =============================================================================
+
+# Clock (50 MHz)
+NET "clk_50mhz" LOC = "C9" | IOSTANDARD = LVCMOS33 ;
+NET "clk_50mhz" TNM_NET = "clk_50mhz" ;
+TIMESPEC "TS_clk" = PERIOD "clk_50mhz" 20 ns HIGH 50% ;
+
+# Reset button (active high)
+NET "btn_south" LOC = "K17" | IOSTANDARD = LVTTL | PULLDOWN ;
+
+# LEDs (heartbeat + sample_tick indicator)
+NET "led<0>" LOC = "F12" | IOSTANDARD = LVTTL | SLEW = SLOW | DRIVE = 8 ;
+NET "led<1>" LOC = "E12" | IOSTANDARD = LVTTL | SLEW = SLOW | DRIVE = 8 ;
+NET "led<2>" LOC = "E11" | IOSTANDARD = LVTTL | SLEW = SLOW | DRIVE = 8 ;
+NET "led<3>" LOC = "F11" | IOSTANDARD = LVTTL | SLEW = SLOW | DRIVE = 8 ;
+NET "led<4>" LOC = "C11" | IOSTANDARD = LVTTL | SLEW = SLOW | DRIVE = 8 ;
+NET "led<5>" LOC = "D11" | IOSTANDARD = LVTTL | SLEW = SLOW | DRIVE = 8 ;
+NET "led<6>" LOC = "E9"  | IOSTANDARD = LVTTL | SLEW = SLOW | DRIVE = 8 ;
+NET "led<7>" LOC = "F9"  | IOSTANDARD = LVTTL | SLEW = SLOW | DRIVE = 8 ;
+
+# SPI Bus (shared - directly drives DAC)
+NET "spi_sck"  LOC = "U16" | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8 ;
+NET "spi_mosi" LOC = "T4"  | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8 ;
+NET "spi_miso" LOC = "N10" | IOSTANDARD = LVCMOS33 ;
+
+# DAC (LTC2624)
+NET "dac_cs"   LOC = "N8"  | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8 ;
+NET "dac_clr"  LOC = "P8"  | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8 ;
+
+# SPI bus device disables
+NET "spi_ss_b"    LOC = "U3"  | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8 ;
+NET "amp_cs"      LOC = "N7"  | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8 ;
+NET "ad_conv"     LOC = "P11" | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8 ;
+NET "sf_ce0"      LOC = "D16" | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8 ;
+NET "fpga_init_b" LOC = "T3"  | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8 ;

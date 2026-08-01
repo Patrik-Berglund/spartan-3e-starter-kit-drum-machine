@@ -1,0 +1,4 @@
+vhdl work "../src/infrastructure/spi_master.vhd"
+vhdl work "../src/infrastructure/dac_driver.vhd"
+vhdl work "../src/infrastructure/sine_table.vhd"
+vhdl work "../src/dac_test.vhd"
