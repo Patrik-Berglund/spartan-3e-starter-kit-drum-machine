@@ -507,39 +507,54 @@ def render_cymbal(n_samples, tone=128, decay=128):
 # === CB (Cowbell) ===
 
 def render_cowbell(n_samples):
-    """2 square oscillators (540/800Hz) + LFSR noise + narrow BPF.
-    Tuned against real TR-808 CB.WAV: centroid=6654Hz, flatness=0.433.
-    noise_mult=10 into the existing 2-stage LP(shift1)+2-stage HP(shift3)
-    narrow bandpass gives centroid=6208Hz, flatness=0.504 -- both close to
-    reference, with the digital staircase artifact eliminated."""
-    phases = [0, 0]; incs = [725, 1075]
-    lp1 = 0; lp2 = 0; hp1 = 0; hp2 = 0
-    amp = 65535
-    lfsr = 0xCAFE
+    """808 Cowbell - two square oscillators through resonant BPF, dual decay.
+
+    Circuit (voices2.PNG): Two square-wave oscillators -> individual VCAs
+    (shared envelope) -> sum -> BANDPASS FILTER -> buffer. NO noise source.
+
+    Real 808 measured (docs/TR808WAV/CB/CB.WAV via FFT):
+    - f1 (557Hz): secondary, -15.9dB relative to f2
+    - f2 (824Hz): dominant
+    - Dual-exponential envelope: fast (tau~8.8ms, 90% weight) +
+      slow ring tail (tau~132ms, 17% weight)
+    - Decay to -20dB: ~42ms, still audible past 200ms (slow tail)
+
+    Uses a resonant state-variable filter (not a flat LP+HP cascade) to
+    get the ~15dB rejection of 557Hz relative to 824Hz seen in the real
+    808 (the two oscillators are also weighted 1:2 before filtering).
+    """
+    phases = [0, 0]; incs = [748, 1106]  # 557Hz, 824Hz
+    svf_lp = 0; svf_bp = 0
+    amp_fast = 65535; amp_slow = 65535
     out = []
     for _ in range(n_samples):
-        sq = 0
-        for i in range(2):
-            sq += 1 if (phases[i] & 0x8000) else -1
+        if amp_fast < 64 and amp_slow < 64:
+            out.append(0); continue
+
+        sq1 = 1 if (phases[0] & 0x8000) else -1
+        sq2 = 1 if (phases[1] & 0x8000) else -1
+        # Weight osc2 (824Hz) 2x relative to osc1 (557Hz) - matches real 808
+        raw = (sq1 + sq2 * 2) << 12
+
         for i in range(2):
             phases[i] = (phases[i] + incs[i]) & 0xFFFF
-        if amp < 64:
-            out.append(0); continue
-        raw = sq << 12  # sq*4096
-        lfsr = lfsr_next(lfsr, [15, 13, 12, 10])
-        noise_raw = (lfsr & 0x7FFF) - 16384
-        raw += (noise_raw * 10) >> 3
-        # Narrow BPF: tight LP + HP
-        lp1 = lp1 + signed_rshift(raw - lp1, 1)
-        lp2 = lp2 + signed_rshift(lp1 - lp2, 1)
-        hp1 = hp1 + signed_rshift(lp2 - hp1, 3)
-        hp2 = hp2 + signed_rshift(hp1 - hp2, 3)
-        bp = lp2 - hp2
-        bp_16 = max(-32768, min(32767, bp))
-        amp_11 = amp >> 5
-        product = bp_16 * amp_11
+
+        # State-variable filter (resonant bandpass), center ~975Hz, Q~4
+        # hp = input - lp - (bp>>2); bp += hp>>3; lp += bp>>3
+        hp = raw - svf_lp - signed_rshift(svf_bp, 2)
+        svf_bp = svf_bp + signed_rshift(hp, 3)
+        svf_lp = svf_lp + signed_rshift(svf_bp, 3)
+        bp_out = svf_bp
+
+        # Combined dual-decay envelope: fast*3/4 + slow*1/4
+        combined_amp = ((amp_fast >> 5) * 3 + (amp_slow >> 5)) >> 2
+        product = bp_out * combined_amp
         out.append(clamp16(product >> 11))
-        amp = decay_step(amp, 10)  # K=10, fast ring decay
+
+        if amp_fast >= 64:
+            amp_fast = decay_step(amp_fast, 9)   # K=9, tau~10.5ms
+        if amp_slow >= 64:
+            amp_slow = decay_step(amp_slow, 11)  # K=11, tau~42ms
     return out
 
 

@@ -2,6 +2,12 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+-- 808 Cowbell - two square oscillators through resonant BPF, dual decay.
+-- Circuit (voices2.PNG): Two square-wave oscillators -> individual VCAs
+-- (shared envelope) -> sum -> BANDPASS FILTER -> buffer. NO noise source.
+-- Real 808 measured: f1=557Hz (secondary, -15.9dB), f2=824Hz (dominant).
+-- Dual-exponential envelope: fast (tau~10.5ms) + slow ring tail (tau~42ms).
+
 entity cowbell is
   port (
     clk         : in  std_logic;
@@ -14,84 +20,81 @@ end entity cowbell;
 
 architecture rtl of cowbell is
   signal p0, p1 : unsigned(15 downto 0) := (others => '0');
-  signal amp    : unsigned(15 downto 0) := (others => '0');
+  signal amp_fast, amp_slow : unsigned(15 downto 0) := (others => '0');
   signal active : std_logic := '0';
-  signal lp_acc1 : signed(15 downto 0) := (others => '0');
-  signal lp_acc2 : signed(15 downto 0) := (others => '0');
-  signal hp_acc1 : signed(15 downto 0) := (others => '0');
-  signal hp_acc2 : signed(15 downto 0) := (others => '0');
-  -- Broadband noise source (same rationale as hihat.vhd).
-  signal lfsr : std_logic_vector(15 downto 0) := x"CAFE";
+
+  -- State-variable filter (resonant bandpass)
+  signal svf_lp : signed(15 downto 0) := (others => '0');
+  signal svf_bp : signed(15 downto 0) := (others => '0');
 begin
   process(clk)
-    variable sq : signed(3 downto 0);
+    variable sq1, sq2 : signed(2 downto 0);
     variable raw : signed(15 downto 0);
-    variable noise_raw : signed(15 downto 0);
-    variable noise_wide : signed(18 downto 0);
-    variable noise_scaled : signed(15 downto 0);
-    variable lp1_next, lp2_next : signed(15 downto 0);
-    variable hp1_next, hp2_next : signed(15 downto 0);
-    variable bp_out : signed(15 downto 0);
-    variable product : signed(27 downto 0);
+    variable hp        : signed(15 downto 0);
+    variable bp_out     : signed(15 downto 0);
+    variable combined_amp : unsigned(15 downto 0);
+    variable product   : signed(27 downto 0);
+    variable dec_fast, dec_slow : unsigned(15 downto 0);
   begin
     if rising_edge(clk) then
       if rst = '1' then
         p0 <= (others => '0'); p1 <= (others => '0');
-        amp <= (others => '0'); active <= '0';
-        lp_acc1 <= (others => '0'); lp_acc2 <= (others => '0');
-        hp_acc1 <= (others => '0'); hp_acc2 <= (others => '0');
-        lfsr <= x"CAFE";
+        amp_fast <= (others => '0'); amp_slow <= (others => '0');
+        active <= '0';
+        svf_lp <= (others => '0'); svf_bp <= (others => '0');
         audio_out <= (others => '0');
       else
         if sample_tick = '1' then
-          p0 <= p0 + to_unsigned(725, 16);   -- 540Hz
-          p1 <= p1 + to_unsigned(1075, 16);  -- 800Hz
+          p0 <= p0 + to_unsigned(748, 16);   -- 557Hz
+          p1 <= p1 + to_unsigned(1106, 16);  -- 824Hz
         end if;
 
         if trigger = '1' then
-          active <= '1'; amp <= to_unsigned(65535, 16);
+          active <= '1';
+          amp_fast <= to_unsigned(65535, 16);
+          amp_slow <= to_unsigned(65535, 16);
         end if;
 
         if sample_tick = '1' and active = '1' then
-          sq := to_signed(0, 4);
-          if p0(15) = '1' then sq := sq + 1; else sq := sq - 1; end if;
-          if p1(15) = '1' then sq := sq + 1; else sq := sq - 1; end if;
+          if p0(15) = '1' then sq1 := to_signed(1, 3); else sq1 := to_signed(-1, 3); end if;
+          if p1(15) = '1' then sq2 := to_signed(1, 3); else sq2 := to_signed(-1, 3); end if;
 
-          -- Scale: ±2 * 4096 = ±8192
-          raw := shift_left(resize(sq, 16), 12);
+          -- Weight osc2 (824Hz) 2x relative to osc1 (557Hz): sq1 + sq2*2
+          -- range: -3..+3, scale by 4096 -> ±12288
+          raw := shift_left(resize(sq1, 16) + shift_left(resize(sq2, 16), 1), 12);
 
-          -- Mix in broadband LFSR noise (noise_mult=10, scaled by >>3);
-          -- shift-and-add (10x = 8x+2x) instead of a multiply to avoid
-          -- consuming a MULT18X18 block.
-          lfsr <= lfsr(14 downto 0) & (lfsr(15) xor lfsr(13) xor lfsr(12) xor lfsr(10));
-          noise_raw := signed(lfsr(14 downto 0) & '0') - to_signed(16384, 16);
-          noise_wide := shift_left(resize(noise_raw, 19), 3) + shift_left(resize(noise_raw, 19), 1);
-          noise_scaled := resize(shift_right(noise_wide, 3), 16);
-          raw := raw + noise_scaled;
+          -- State-variable filter: hp = in - lp - (bp>>2); bp += hp>>3; lp += bp>>3
+          -- (matches sim's exact update order: hp uses old bp/lp, then bp
+          -- updates using hp, then lp updates using the NEW bp)
+          hp := raw - svf_lp - shift_right(svf_bp, 2);
+          bp_out := svf_bp + shift_right(hp, 3);
+          svf_bp <= bp_out;
+          svf_lp <= svf_lp + shift_right(bp_out, 3);
 
-          -- BPF: 2-stage LP (shift 1, was 2) + 2-stage HP (shift 3, was 4) --
-          -- widened slightly to preserve the injected noise's spectral
-          -- contribution (sim result vs real CB.WAV: centroid=5215Hz/
-          -- flatness=0.44 vs ref centroid=6654Hz/flatness=0.43).
-          lp1_next := lp_acc1 + shift_right(raw - lp_acc1, 1);
-          lp_acc1 <= lp1_next;
-          lp2_next := lp_acc2 + shift_right(lp1_next - lp_acc2, 1);
-          lp_acc2 <= lp2_next;
-          hp1_next := hp_acc1 + shift_right(lp2_next - hp_acc1, 3);
-          hp_acc1 <= hp1_next;
-          hp2_next := hp_acc2 + shift_right(hp1_next - hp_acc2, 3);
-          hp_acc2 <= hp2_next;
-          bp_out := lp2_next - hp2_next;
+          -- Combined dual-decay envelope: (fast*3 + slow) >> 2
+          combined_amp := resize(shift_right(
+            resize(amp_fast(15 downto 5), 18) * 3 + resize(amp_slow(15 downto 5), 18),
+            2), 16);
 
-          product := bp_out * signed('0' & amp(15 downto 5));
+          product := bp_out * signed('0' & combined_amp(10 downto 0));
           audio_out <= product(26 downto 11);
 
-          -- Exponential decay K=10. Force to 0 once the decay term itself
-          -- is 0 -- K=10 floor is 1024, above the old amp<64 threshold, so
-          -- amp would get permanently stuck without this.
-          if amp(15 downto 10) = "000000" then amp <= (others => '0');
-          else amp <= amp - ("0000000000" & amp(15 downto 10)); end if;
-          if amp < 64 then active <= '0'; audio_out <= (others => '0');
+          -- Fast decay: K=9, only decay if >=64 (prevent underflow wrap)
+          if amp_fast >= 64 then
+            dec_fast := "000000000" & amp_fast(15 downto 9);
+            if dec_fast = 0 then amp_fast <= amp_fast - 1;
+            else amp_fast <= amp_fast - dec_fast; end if;
+          end if;
+
+          -- Slow decay: K=11
+          if amp_slow >= 64 then
+            dec_slow := "00000000000" & amp_slow(15 downto 11);
+            if dec_slow = 0 then amp_slow <= amp_slow - 1;
+            else amp_slow <= amp_slow - dec_slow; end if;
+          end if;
+
+          if amp_fast < 64 and amp_slow < 64 then
+            active <= '0';
           end if;
         elsif active = '0' then
           audio_out <= (others => '0');
