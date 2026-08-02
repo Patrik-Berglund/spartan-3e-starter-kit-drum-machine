@@ -547,28 +547,43 @@ def render_cowbell(n_samples):
 # === RS (Rimshot) ===
 
 def render_rimshot(n_samples):
-    """3 parallel sines (455+680+1020Hz) with hard clipping for harmonics, fast decay."""
-    ph1 = 0; ph2 = 0; ph3 = 0
-    amp = 65535
+    """808 Rimshot - dual resonant modes from shared RS/CL oscillator circuit.
+    
+    Real 808 RS spectrum (FFT measurement):
+    - 1712 Hz: dominant, decays fast (tau~2.6ms, K=7)
+    - 458 Hz: secondary, decays slower (tau~5.2ms, K=8), gives the "body"
+    Two independent envelopes create the bright-attack/warm-tail character.
+    
+    Phase increments (48828Hz SR):
+      458Hz -> inc=615
+      1712Hz -> inc=2298
+    """
+    ph_lo = 0; ph_hi = 0
+    amp_lo = 65535  # 458Hz envelope (slower decay)
+    amp_hi = 65535  # 1712Hz envelope (faster decay)
     out = []
     for _ in range(n_samples):
-        if amp < 64:
+        if amp_lo < 64 and amp_hi < 64:
             out.append(0); continue
-        s1 = sine_lookup(ph1)
-        s2 = sine_lookup(ph2)
-        s3 = sine_lookup(ph3)
-        # Sum and hard-clip to add harmonics (like swing VCA)
-        mix = s1 + s2 + s3
-        # Clip to ±2047 (creates odd harmonics)
-        if mix > 2047: mix = 2047
-        elif mix < -2048: mix = -2048
-        amp_11 = amp >> 5
-        product = mix * amp_11
-        out.append(clamp16(product >> 7))
-        ph1 = (ph1 + 610) & 0xFFFF   # 455Hz
-        ph2 = (ph2 + 912) & 0xFFFF   # 680Hz
-        ph3 = (ph3 + 1368) & 0xFFFF  # 1020Hz
-        amp = decay_step(amp, 8)  # K=8, tau~5ms
+        s_lo = sine_lookup(ph_lo)
+        s_hi = sine_lookup(ph_hi)
+
+        # Lower mode at 76% relative level, upper mode boosted (decays fast,
+        # needs higher initial gain to be perceptually/spectrally dominant
+        # like the real 808, where 1712Hz measures 100% vs 458Hz's 76%)
+        p_lo = (s_lo * (amp_lo >> 5) * 3) >> 2   # 0.75x scale
+        p_hi = s_hi * (amp_hi >> 5) * 5           # 5x boost
+
+        mix = signed_rshift(p_lo, 9) + signed_rshift(p_hi, 10)
+        out.append(clamp16(mix))
+
+        ph_lo = (ph_lo + 615) & 0xFFFF   # 458Hz
+        ph_hi = (ph_hi + 2298) & 0xFFFF  # 1712Hz
+
+        if amp_lo >= 64:
+            amp_lo = decay_step(amp_lo, 9)  # K=9, tau~10ms (slower, gives body)
+        if amp_hi >= 64:
+            amp_hi = decay_step(amp_hi, 8)  # K=8, tau~5ms (faster, gives tick)
     return out
 
 

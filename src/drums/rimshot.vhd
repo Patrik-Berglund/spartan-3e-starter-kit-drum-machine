@@ -2,6 +2,10 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+-- 808 Rimshot - dual resonant modes from shared RS/CL oscillator circuit.
+-- Real 808 RS spectrum: 1712Hz (dominant, fast decay) + 458Hz (secondary, slower decay).
+-- Two independent envelopes create the bright-attack/warm-tail character.
+
 entity rimshot is
   port (
     clk         : in  std_logic;
@@ -13,8 +17,8 @@ entity rimshot is
 end entity rimshot;
 
 architecture rtl of rimshot is
-  signal ph1, ph2, ph3 : unsigned(15 downto 0) := (others => '0');
-  signal amp : unsigned(15 downto 0) := (others => '0');
+  signal ph_lo, ph_hi : unsigned(15 downto 0) := (others => '0');
+  signal amp_lo, amp_hi : unsigned(15 downto 0) := (others => '0');
   signal active : std_logic := '0';
 
   type sine_t is array(0 to 63) of signed(11 downto 0);
@@ -37,47 +41,65 @@ architecture rtl of rimshot is
     to_signed(-783,12),to_signed(-594,12),to_signed(-399,12),to_signed(-201,12)
   );
 
-  signal s1, s2, s3 : signed(11 downto 0);
+  signal s_lo, s_hi : signed(11 downto 0);
+
+  constant PINC_LO : unsigned(15 downto 0) := to_unsigned(615, 16);   -- 458Hz
+  constant PINC_HI : unsigned(15 downto 0) := to_unsigned(2298, 16);  -- 1712Hz
 begin
-  s1 <= SINE(to_integer(ph1(15 downto 10)));
-  s2 <= SINE(to_integer(ph2(15 downto 10)));
-  s3 <= SINE(to_integer(ph3(15 downto 10)));
+  s_lo <= SINE(to_integer(ph_lo(15 downto 10)));
+  s_hi <= SINE(to_integer(ph_hi(15 downto 10)));
 
   process(clk)
-    variable mix : signed(13 downto 0);
-    variable product : signed(23 downto 0);
+    variable p_lo, p_hi : signed(27 downto 0);
+    variable mix        : signed(16 downto 0);
+    variable dec_lo, dec_hi : unsigned(15 downto 0);
   begin
     if rising_edge(clk) then
       if rst = '1' then
-        ph1 <= (others => '0'); ph2 <= (others => '0'); ph3 <= (others => '0');
-        amp <= (others => '0'); active <= '0'; audio_out <= (others => '0');
+        ph_lo <= (others => '0'); ph_hi <= (others => '0');
+        amp_lo <= (others => '0'); amp_hi <= (others => '0');
+        active <= '0'; audio_out <= (others => '0');
       else
         if trigger = '1' then
           active <= '1';
-          ph1 <= (others => '0'); ph2 <= (others => '0'); ph3 <= (others => '0');
-          amp <= to_unsigned(65535, 16);
+          ph_lo <= (others => '0'); ph_hi <= (others => '0');
+          amp_lo <= to_unsigned(65535, 16);
+          amp_hi <= to_unsigned(65535, 16);
         end if;
 
         if sample_tick = '1' and active = '1' then
-          -- 455Hz=610, 680Hz=912, 1020Hz=1368
-          ph1 <= ph1 + to_unsigned(610, 16);
-          ph2 <= ph2 + to_unsigned(912, 16);
-          ph3 <= ph3 + to_unsigned(1368, 16);
+          ph_lo <= ph_lo + PINC_LO;
+          ph_hi <= ph_hi + PINC_HI;
 
-          -- Sum 3 sines
-          mix := resize(s1, 14) + resize(s2, 14) + resize(s3, 14);
+          -- p_lo = (s_lo * (amp_lo>>5) * 3) >> 2  [matches sim exactly]
+          p_lo := shift_right(resize(s_lo * signed('0' & amp_lo(15 downto 5)), 28) *
+                  to_signed(3, 3), 2);
+          -- p_hi = s_hi * (amp_hi>>5) * 5
+          p_hi := resize(s_hi * signed('0' & amp_hi(15 downto 5)), 28) * to_signed(5, 4);
 
-          -- Apply amplitude
-          product := resize(mix, 12) * signed('0' & amp(15 downto 5));
-          audio_out <= product(22 downto 7);
+          -- mix = p_lo>>9 + p_hi>>10  [matches sim]
+          mix := resize(shift_right(p_lo, 9), 17) + resize(shift_right(p_hi, 10), 17);
 
-          -- Very fast exponential decay K=8 (tau ~5ms). Force to 0 once
-          -- the decay term itself is 0 -- K=8 floor is 256, above the old
-          -- amp<64 threshold, so amp would get permanently stuck without
-          -- this.
-          if amp(15 downto 8) = "00000000" then amp <= (others => '0');
-          else amp <= amp - ("00000000" & amp(15 downto 8)); end if;
-          if amp < 64 then active <= '0'; audio_out <= (others => '0');
+          if mix > 32767 then audio_out <= to_signed(32767, 16);
+          elsif mix < -32768 then audio_out <= to_signed(-32768, 16);
+          else audio_out <= mix(15 downto 0); end if;
+
+          -- Lower tone: K=9 (tau~10ms), only decay if >= 64 (prevent underflow wrap)
+          if amp_lo >= 64 then
+            dec_lo := "000000000" & amp_lo(15 downto 9);
+            if dec_lo = 0 then amp_lo <= amp_lo - 1;
+            else amp_lo <= amp_lo - dec_lo; end if;
+          end if;
+
+          -- Upper tone: K=8 (tau~5ms), only decay if >= 64
+          if amp_hi >= 64 then
+            dec_hi := "00000000" & amp_hi(15 downto 8);
+            if dec_hi = 0 then amp_hi <= amp_hi - 1;
+            else amp_hi <= amp_hi - dec_hi; end if;
+          end if;
+
+          if amp_lo < 64 and amp_hi < 64 then
+            active <= '0';
           end if;
         elsif active = '0' then
           audio_out <= (others => '0');
