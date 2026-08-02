@@ -420,7 +420,9 @@ def render_metallic_core(n_samples, decay_k, bpf_lp_shift, bpf_hp_shift, noise_m
     phases = [0]*6
     lp1 = 0
     hp = [0, 0, 0, 0]
-    amp = 65535
+    amp = 1048575  # 20-bit full scale (was 65535/16-bit - too coarse for
+                   # long K=13-15 decays, caused audible death clicks at
+                   # -6 to -12dB when amp>>K hit 0 prematurely)
     lfsr = lfsr_seed
     out = []
     for _ in range(n_samples):
@@ -430,7 +432,7 @@ def render_metallic_core(n_samples, decay_k, bpf_lp_shift, bpf_hp_shift, noise_m
             sq_sum += 1 if (phases[i] & 0x8000) else -1
         for i in range(6):
             phases[i] = (phases[i] + incs[i]) & 0xFFFF
-        if amp < 512:
+        if amp < 8192:  # scaled equivalent of the old amp<512 threshold (x16)
             out.append(0); continue
         # Scale: sq * 5440
         raw = (sq_sum << 12) + (sq_sum << 10) + (sq_sum << 8) + (sq_sum << 6)
@@ -457,9 +459,9 @@ def render_metallic_core(n_samples, decay_k, bpf_lp_shift, bpf_hp_shift, noise_m
             hp[i] = hp[i] + signed_rshift(x - hp[i], bpf_hp_shift)
             x = x - hp[i]
         bp = x
-        # Multiply by amplitude
+        # Multiply by amplitude (amp is now 20-bit: use top 11 bits, amp>>9)
         bp_16 = max(-32768, min(32767, bp))
-        amp_11 = amp >> 5
+        amp_11 = amp >> 9
         product = bp_16 * amp_11
         out.append(clamp16(product >> 11))
         amp = decay_step(amp, decay_k)
@@ -489,18 +491,26 @@ def render_oh(n_samples, decay=128):
 # === CY (Cymbal) ===
 
 def render_cymbal(n_samples, tone=128, decay=128):
-    """Tuned against real TR-808 CY5050.WAV: centroid=6924Hz, flatness=0.494.
-    lp_shift=2/hp_shift=4 (darker/steeper than CH/OH's lp_shift=0/hp_shift=2)
-    matches the cymbal's lower measured centroid; tone knob shifts brighter."""
-    if tone < 86: lp_shift = 3  # darker
-    elif tone < 171: lp_shift = 2  # mid (matches CY5050 reference)
-    else: lp_shift = 1  # brighter
-    if decay < 52: dk = 11
-    elif decay < 103: dk = 12
-    elif decay < 154: dk = 13
-    elif decay < 205: dk = 14
-    else: dk = 15
-    return render_metallic_core(n_samples, decay_k=dk, bpf_lp_shift=lp_shift, bpf_hp_shift=4,
+    """808 Cymbal - 6 oscillators through BPF, long dual-character decay.
+
+    Real 808 measured (docs/TR808WAV/CY/):
+    - Spectral centroid ~5800-6450Hz (TONE brightens it)
+    - Decay tau 185ms (DECAY=00) up to 758ms (DECAY=10) - much longer
+      than CH/OH's ms-scale decays, needs high K values (13-15)
+    - Dual-exponential envelope (fast ~159ms + slow ~561ms) - approximated
+      here with a single K per DECAY setting; real dual-envelope would
+      need a second amp register (future refinement)
+    """
+    if tone < 86: hp_shift = 3     # darker, centroid ~4200Hz
+    elif tone < 171: hp_shift = 2  # mid, centroid ~6650Hz (matches CY50)
+    else: hp_shift = 2             # bright (lp_shift narrows further below)
+    lp_shift = 1 if tone >= 171 else 2
+
+    if decay < 86: dk = 13    # tau~188ms (target 185ms)
+    elif decay < 171: dk = 14  # tau~375ms (target 324-511ms)
+    else: dk = 15              # tau~671ms (target 673-758ms)
+
+    return render_metallic_core(n_samples, decay_k=dk, bpf_lp_shift=lp_shift, bpf_hp_shift=hp_shift,
                                  noise_mult=10, hp_stages=4, lfsr_seed=0xC0DE)
 
 
