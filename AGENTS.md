@@ -211,6 +211,8 @@ Reference materials are in `docs/`:
 - `docs/808-synthesis-reference.md` — target parameters per voice
 - `docs/TR808WAV/` — real TR-808 samples for A/B comparison
 - `docs/reference-images/` — service manual schematics
+  - `voices1.PNG` — BD, SD, LT/MT/HT, RS/CL, CP/MA block diagrams
+  - `voices2.PNG` — CB, CY, OH, CH block diagrams
 - `docs/reference-text/` — service manual analysis, Gemini voice descriptions
 
 ### Sim-first workflow
