@@ -7,6 +7,7 @@ entity top is
     clk_50mhz   : in  std_logic;
     btn_south    : in  std_logic;
     serial_rx    : in  std_logic;
+    serial_tx    : out std_logic;
     ps2_clk      : in  std_logic;
     ps2_data     : in  std_logic;
     vga_red      : out std_logic;
@@ -65,6 +66,15 @@ architecture rtl of top is
   signal uart_wr_en   : std_logic;
   signal uart_wr_addr : unsigned(6 downto 0);
   signal uart_wr_data : unsigned(7 downto 0);
+
+  -- Capture control
+  signal capture_arm   : std_logic;
+  signal capture_dump  : std_logic;
+  signal capture_tx_data  : std_logic_vector(7 downto 0);
+  signal capture_tx_start : std_logic;
+  signal capture_tx_ready : std_logic;
+  signal capture_state    : std_logic_vector(2 downto 0);
+  signal any_trig         : std_logic;
 
   -- Sequencer triggers merged with register map triggers
   signal merged_trig : std_logic_vector(10 downto 0);
@@ -130,6 +140,44 @@ begin
   u_uart : entity work.uart_rx
     port map (clk => clk_50mhz, rst => rst, rx => serial_rx,
               wr_en => uart_wr_en, wr_addr => uart_wr_addr, wr_data => uart_wr_data);
+
+  -- Capture command detection: addr 0x7D = arm, addr 0x7E = dump
+  process(clk_50mhz)
+  begin
+    if rising_edge(clk_50mhz) then
+      capture_arm  <= '0';
+      capture_dump <= '0';
+      if uart_wr_en = '1' then
+        if uart_wr_addr = to_unsigned(125, 7) then  -- 0x7D
+          capture_arm <= '1';
+        end if;
+        if uart_wr_addr = to_unsigned(126, 7) then  -- 0x7E
+          capture_dump <= '1';
+        end if;
+      end if;
+    end if;
+  end process;
+
+  -- Any trigger detection for capture start
+  any_trig <= merged_trig(0) or merged_trig(1) or merged_trig(2) or
+              merged_trig(3) or merged_trig(4) or merged_trig(5) or
+              merged_trig(6) or merged_trig(7) or merged_trig(8) or
+              merged_trig(9) or merged_trig(10);
+
+  -- Sample capture buffer
+  u_capture : entity work.sample_capture
+    port map (clk => clk_50mhz, rst => rst,
+              sample_tick => sample_tick, mix_in => mix_out,
+              any_trig => any_trig,
+              cmd_arm => capture_arm, cmd_dump => capture_dump,
+              tx_data => capture_tx_data, tx_start => capture_tx_start,
+              tx_ready => capture_tx_ready, state_out => capture_state);
+
+  -- UART transmitter
+  u_uart_tx : entity work.uart_tx
+    port map (clk => clk_50mhz, rst => rst,
+              tx_data => capture_tx_data, tx_start => capture_tx_start,
+              tx_pin => serial_tx, tx_ready => capture_tx_ready);
 
   -- Merge sequencer triggers with register map triggers (OR)
   merged_trig <= trig_out(11 downto 1) or reg_triggers;
