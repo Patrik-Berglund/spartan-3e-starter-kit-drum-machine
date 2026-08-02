@@ -471,9 +471,14 @@ def render_metallic_core(n_samples, decay_k, bpf_lp_shift, bpf_hp_shift, noise_m
 # === CH (Closed HiHat) ===
 
 def render_ch(n_samples):
-    """Short metallic hit. Decay K=9 (~10ms to -20dB)."""
+    """808 Closed Hi-Hat - 6 oscillators through BPF, very short decay.
+    Real 808 measured: centroid ~10991Hz, flatness ~0.10 (tonal, not
+    broadband), decay -20dB at ~26ms, peak amplitude ~18347. No noise
+    source in the real circuit (confirmed via voices2.PNG schematic) -
+    removed noise_mult (was 10). hp_stages=3 (was 4) with shift=2 gives
+    centroid=10711Hz and peak=13764, both close to real 808 measurements."""
     return render_metallic_core(n_samples, decay_k=9, bpf_lp_shift=0, bpf_hp_shift=2,
-                                 noise_mult=10, hp_stages=4, lfsr_seed=0xF00D)
+                                 noise_mult=0, hp_stages=3, lfsr_seed=0xF00D)
 
 
 # === OH (Open HiHat) ===
