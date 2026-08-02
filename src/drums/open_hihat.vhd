@@ -2,6 +2,16 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+-- 808 Open Hi-Hat - 6 oscillators through HP cascade + LP rolloff.
+--
+-- Deep re-investigation found the old filter let too much low-frequency
+-- energy through (sounded buzzy). OH's real character is darker and less
+-- "shimmery" than CH (centroid~9343Hz vs CH's ~11517Hz, ZCR~14976/s vs
+-- CH's ~22352/s) - matches the real circuit having one fewer filter
+-- stage than CH (per service manual: CH has an extra Q31 HPF that OH
+-- lacks). 4-stage HP cascade (shifts 1,2,2,2, gentler than CH's all-1s)
+-- + LP rolloff + small noise for shimmer + gain compensation.
+
 entity open_hihat is
   port (
     clk         : in  std_logic;
@@ -15,17 +25,13 @@ end entity open_hihat;
 
 architecture rtl of open_hihat is
   signal p0, p1, p2, p3, p4, p5 : unsigned(15 downto 0) := (others => '0');
-  signal amp     : unsigned(19 downto 0) := (others => '0');  -- widened from
-    -- 16 to 20 bits (same fix as cymbal.vhd) -- sim's shared
-    -- render_metallic_core was widened during the CY fix and VHDL must
-    -- match exactly. At K=11-14 the old 16-bit floor caused an audible
-    -- death-click when the voice cut out early.
+  signal amp     : unsigned(19 downto 0) := (others => '0');
   signal active  : std_logic := '0';
-  -- BPF: 1-stage LP + 4-stage HP. Widened to 18-bit (see hihat.vhd comment
-  -- for rationale -- square-sum + noise can reach +-53118, overflowing a
-  -- 16-bit signed accumulator and causing runaway noise buildup).
-  signal lp_acc : signed(17 downto 0) := (others => '0');
+  -- 4-stage HP cascade (shifts 1,2,2,2), then LP rolloff stage
   signal hp_acc0, hp_acc1, hp_acc2, hp_acc3 : signed(17 downto 0) := (others => '0');
+  signal lp_out_acc : signed(17 downto 0) := (others => '0');
+  -- Post-filter noise source for shimmer (LFSR)
+  signal lfsr : std_logic_vector(15 downto 0) := x"BEE5";
 
   -- DECAY: K value 11-14 (real 808 OH decay 74-448ms)
   signal decay_k : integer range 11 to 14;
@@ -38,9 +44,14 @@ begin
   process(clk)
     variable sq : signed(4 downto 0);
     variable raw : signed(17 downto 0);
-    variable lp_out : signed(17 downto 0);
     variable x0, x1, x2, x3 : signed(17 downto 0);
-    variable x3_clamped : signed(15 downto 0);
+    variable new_hp0, new_hp1, new_hp2, new_hp3 : signed(17 downto 0);
+    variable new_lp : signed(17 downto 0);
+    variable bp : signed(17 downto 0);
+    variable noise_raw : signed(15 downto 0);
+    variable noise_scaled : signed(17 downto 0);
+    variable bp_gained : signed(23 downto 0);
+    variable bp_clamped : signed(15 downto 0);
     variable product : signed(27 downto 0);
   begin
     if rising_edge(clk) then
@@ -49,9 +60,10 @@ begin
         p2 <= (others => '0'); p3 <= (others => '0');
         p4 <= (others => '0'); p5 <= (others => '0');
         amp <= (others => '0'); active <= '0';
-        lp_acc <= (others => '0');
         hp_acc0 <= (others => '0'); hp_acc1 <= (others => '0');
         hp_acc2 <= (others => '0'); hp_acc3 <= (others => '0');
+        lp_out_acc <= (others => '0');
+        lfsr <= x"BEE5";
         audio_out <= (others => '0');
       else
         if sample_tick = '1' then
@@ -64,7 +76,8 @@ begin
         end if;
 
         if trigger = '1' then
-          active <= '1'; amp <= to_unsigned(1048575, 20);
+          active <= '1';
+          amp <= to_unsigned(1048575, 20);
         end if;
 
         if sample_tick = '1' and active = '1' then
@@ -79,45 +92,61 @@ begin
           raw := shift_left(resize(sq, 18), 12) + shift_left(resize(sq, 18), 10) +
                  shift_left(resize(sq, 18), 8) + shift_left(resize(sq, 18), 6);
 
-          -- BPF: 1-stage LP (shift=1) + 4-stage HP (shift=2). No noise
-          -- source (removed - real 808 OH is a clean tonal sound,
-          -- measured flatness ~0.05, noise made it too broadband/hissy).
-          -- LP shift=1 brings centroid down from ~12300Hz to ~9350Hz,
-          -- matching real 808 OH measurements.
-          lp_acc <= lp_acc + shift_right(raw - lp_acc, 1);
-          lp_out := lp_acc;
-          hp_acc0 <= hp_acc0 + shift_right(lp_out - hp_acc0, 2);
-          x0 := lp_out - hp_acc0;
-          hp_acc1 <= hp_acc1 + shift_right(x0 - hp_acc1, 2);
-          x1 := x0 - hp_acc1;
-          hp_acc2 <= hp_acc2 + shift_right(x1 - hp_acc2, 2);
-          x2 := x1 - hp_acc2;
-          hp_acc3 <= hp_acc3 + shift_right(x2 - hp_acc3, 2);
-          x3 := x2 - hp_acc3;
+          -- Mix in broadband LFSR noise BEFORE filtering (noise_mult=1,
+          -- scaled by >>3) - matches sim's render_metallic_core exactly.
+          lfsr <= lfsr(14 downto 0) & (lfsr(15) xor lfsr(13) xor lfsr(12) xor lfsr(10));
+          noise_raw := signed(resize(unsigned(lfsr(14 downto 0)), 16)) - to_signed(16384, 16);
+          noise_scaled := resize(shift_right(resize(noise_raw, 18), 3), 18);
+          raw := raw + noise_scaled;
 
-          -- Clamp back to 16-bit before the amplitude multiply.
-          if x3 > 32767 then x3_clamped := to_signed(32767, 16);
-          elsif x3 < -32768 then x3_clamped := to_signed(-32768, 16);
-          else x3_clamped := x3(15 downto 0);
+          -- 4-stage HP cascade (shifts 1,2,2,2). Uses new_hp variables for
+          -- immediate-update semantics matching sim (see hihat.vhd comment
+          -- for why reading the signal directly here was a critical bug).
+          new_hp0 := hp_acc0 + shift_right(raw - hp_acc0, 1);
+          x0 := raw - new_hp0;
+          hp_acc0 <= new_hp0;
+          new_hp1 := hp_acc1 + shift_right(x0 - hp_acc1, 2);
+          x1 := x0 - new_hp1;
+          hp_acc1 <= new_hp1;
+          new_hp2 := hp_acc2 + shift_right(x1 - hp_acc2, 2);
+          x2 := x1 - new_hp2;
+          hp_acc2 <= new_hp2;
+          new_hp3 := hp_acc3 + shift_right(x2 - hp_acc3, 2);
+          x3 := x2 - new_hp3;
+          hp_acc3 <= new_hp3;
+          bp := x3;
+
+          -- LP rolloff stage (shift=2)
+          new_lp := lp_out_acc + shift_right(bp - lp_out_acc, 2);
+          bp := new_lp;
+          lp_out_acc <= new_lp;
+
+          -- Gain compensation (x15 = x1+x2+x4+x8) for the filter's reduced
+          -- level. Shift-and-add instead of a multiply to save a MULT18X18.
+          bp_gained := resize(bp, 24) + shift_left(resize(bp, 24), 1) +
+                       shift_left(resize(bp, 24), 2) + shift_left(resize(bp, 24), 3);
+          if bp_gained > 32767 then bp_clamped := to_signed(32767, 16);
+          elsif bp_gained < -32768 then bp_clamped := to_signed(-32768, 16);
+          else bp_clamped := bp_gained(15 downto 0);
           end if;
 
-          product := x3_clamped * signed('0' & amp(19 downto 9));
+          -- Multiply by amplitude (top 11 bits of the 20-bit amp)
+          product := bp_clamped * signed('0' & amp(19 downto 9));
           audio_out <= product(26 downto 11);
 
-          -- Exponential decay with variable K on the 20-bit amp register.
-          -- Force to 0 once the decay term itself is 0.
+          -- Exponential decay with variable K, linear tail
           case decay_k is
             when 11 =>
-              if amp(19 downto 11) = "000000000" then amp <= (others => '0');
+              if amp(19 downto 11) = "000000000" then amp <= amp - 1;
               else amp <= amp - ("000000000" & amp(19 downto 11)); end if;
             when 12 =>
-              if amp(19 downto 12) = "00000000" then amp <= (others => '0');
+              if amp(19 downto 12) = "00000000" then amp <= amp - 1;
               else amp <= amp - ("00000000" & amp(19 downto 12)); end if;
             when 13 =>
-              if amp(19 downto 13) = "0000000" then amp <= (others => '0');
+              if amp(19 downto 13) = "0000000" then amp <= amp - 1;
               else amp <= amp - ("0000000" & amp(19 downto 13)); end if;
             when others => -- 14
-              if amp(19 downto 14) = "000000" then amp <= (others => '0');
+              if amp(19 downto 14) = "000000" then amp <= amp - 1;
               else amp <= amp - ("000000" & amp(19 downto 14)); end if;
           end case;
 

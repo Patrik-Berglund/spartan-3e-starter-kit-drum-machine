@@ -386,80 +386,79 @@ def render_ht(n_samples, tuning=128):
 
 # === Metallic voices: 6 square oscillators + BPF ===
 
-def render_metallic_core(n_samples, decay_k, bpf_lp_shift, bpf_hp_shift, noise_mult=0, hp_stages=4, lfsr_seed=0xF00D):
-    """6 free-running square oscs + LFSR noise + multi-stage BPF.
+def render_metallic_core(n_samples, decay_k, hp_shifts, out_lp_shift=0,
+                          gain_mult=1, noise_mult=0, lfsr_seed=0xF00D,
+                          clip_thresh=None):
+    """6 free-running square oscs through steep HP cascade + output LP,
+    with optional soft-clip nonlinearity (models the real 808's
+    "swing-type VCA" distortion) and gain compensation.
+
     Real 808 frequencies: 205, 304, 370, 523, 540, 800 Hz.
-    Target: pass ~6-12kHz (beating products), reject fundamentals.
 
-    noise_mult: integer multiplier for LFSR broadband noise mixed in with the
-      square-oscillator sum before filtering. 0 = original behavior (no
-      noise). Prototype (scripts/prototype_metallic.py) found noise fills in
-      the spectral gaps left by the coarse 7-level square-sum staircase,
-      closing most of the gap to the real TR-808's measured spectral
-      flatness (steppiness eliminated, flatness 0.58 vs 0.49 reference).
-    hp_stages: number of cascaded 1st-order HP filter stages (1-4). Prototype
-      found order=1 (i.e. hp_stages=1) is needed to let the noise's spectral
-      contribution through -- more HP stages progressively strangle it
-      (flatness caps around 0.27 at 2 stages regardless of noise gain).
+    Deep re-investigation (spectrogram + energy-band analysis against
+    real TR-808 CH.WAV/OH*.WAV) found the previous single-shift HP
+    cascade was far too gentle: real 808 has <1% energy below 4kHz,
+    our old output had 21-31%. This made it sound "buzzy" (fundamentals
+    leaking through) instead of "shimmery" (clean high-frequency metallic
+    character). Root cause: our filter slope was ~18dB/oct; real 808's
+    signal path has 3 cascaded filter stages (op-amp HPF + VCA natural
+    rolloff + a second HPF stage) giving a much steeper effective slope.
 
-    IMPORTANT (bug fix): `raw` (square-sum + noise) can reach magnitude
-    ~53118 (6*5440 + noise_scaled_max), which overflows a 16-bit signed
-    range (+-32767) and would wrap in the real VHDL's signed(15 downto 0)
-    `raw` variable. This Python model previously used plain Python ints
-    (no overflow at all), which is why it never caught this -- confirmed
-    on real hardware via oscilloscope: DAC output showed background noise
-    that built up over a few seconds of playback and never recovered,
-    because the un-reset filter accumulators (lp_acc/hp_acc) inherited
-    corrupted wrapped values. The VHDL fix widens raw/lp_acc/hp_acc to
-    18-bit; this Python model now mirrors that by clamping raw to the
-    16-bit range that the ORIGINAL (buggy) VHDL would have wrapped at, to
-    verify the fix is necessary -- see render_metallic_core_18bit below for
-    the actual fixed-width simulation matching the corrected VHDL.
+    hp_shifts: list of per-stage HP filter shift values (mix of 1 and 2
+      gives a steeper composite slope than N stages all at the same shift)
+    out_lp_shift: single LP stage after the HP cascade, models the real
+      circuit's high-frequency rolloff above ~16-18kHz (bandwidth limit)
+    gain_mult: output gain multiplier to compensate for the steeper
+      filter's reduced pass-band level (integer, applied as a shift-friendly
+      multiply)
+    clip_thresh: if set, soft-clip |raw| above this threshold (models the
+      "swing-type VCA" nonlinear distortion mentioned in the service
+      manual - generates intermodulation products between the 6 oscillators)
     """
     incs = [275, 409, 496, 702, 725, 1075]
     phases = [0]*6
-    lp1 = 0
-    hp = [0, 0, 0, 0]
-    amp = 1048575  # 20-bit full scale (was 65535/16-bit - too coarse for
-                   # long K=13-15 decays, caused audible death clicks at
-                   # -6 to -12dB when amp>>K hit 0 prematurely)
+    hp = [0] * len(hp_shifts)
+    lp_out_acc = 0
+    amp = 1048575  # 20-bit full scale
     lfsr = lfsr_seed
     out = []
     for _ in range(n_samples):
-        # Sum square waves
         sq_sum = 0
         for i in range(6):
             sq_sum += 1 if (phases[i] & 0x8000) else -1
         for i in range(6):
             phases[i] = (phases[i] + incs[i]) & 0xFFFF
-        if amp < 8192:  # scaled equivalent of the old amp<512 threshold (x16)
+        if amp < 8192:
             out.append(0); continue
-        # Scale: sq * 5440
+
         raw = (sq_sum << 12) + (sq_sum << 10) + (sq_sum << 8) + (sq_sum << 6)
 
         if noise_mult:
             lfsr = lfsr_next(lfsr, [15, 13, 12, 10])
-            noise_raw = (lfsr & 0x7FFF) - 16384  # 15-bit signed, ~std=9459
-            # Scale noise down to be comparable to raw (sq_sum std ~2.16 * 5440
-            # ~= 11750). noise_mult acts as an integer gain in eighths.
+            noise_raw = (lfsr & 0x7FFF) - 16384
             noise_scaled = (noise_raw * noise_mult) >> 3
             raw += noise_scaled
 
-        # Fixed-width simulation (matches corrected VHDL): raw/lp1/hp are
-        # conceptually 18-bit here (Python ints don't truncate, but the
-        # VHDL now has enough headroom that this never needs clamping in
-        # practice -- the clamp at x3 below is the actual safety net,
-        # matching the VHDL's x3_clamped).
+        # Soft-clip nonlinearity (models swing-type VCA distortion)
+        if clip_thresh is not None:
+            if raw > clip_thresh:
+                raw = clip_thresh + ((raw - clip_thresh) >> 2)
+            elif raw < -clip_thresh:
+                raw = -clip_thresh + ((raw + clip_thresh) >> 2)
 
-        # LP: gentle anti-alias
-        lp1 = lp1 + signed_rshift(raw - lp1, bpf_lp_shift)
-        # HP cascade (1..4 stages, each shift=bpf_hp_shift)
-        x = lp1
-        for i in range(hp_stages):
-            hp[i] = hp[i] + signed_rshift(x - hp[i], bpf_hp_shift)
+        # Multi-stage HP cascade with per-stage shift (steeper composite slope)
+        x = raw
+        for i, shift in enumerate(hp_shifts):
+            hp[i] = hp[i] + signed_rshift(x - hp[i], shift)
             x = x - hp[i]
         bp = x
-        # Multiply by amplitude (amp is now 20-bit: use top 11 bits, amp>>9)
+
+        # Output LP stage (bandwidth-limit above the metallic shimmer band)
+        if out_lp_shift > 0:
+            lp_out_acc = lp_out_acc + signed_rshift(bp - lp_out_acc, out_lp_shift)
+            bp = lp_out_acc
+
+        bp *= gain_mult
         bp_16 = max(-32768, min(32767, bp))
         amp_11 = amp >> 9
         product = bp_16 * amp_11
@@ -471,55 +470,85 @@ def render_metallic_core(n_samples, decay_k, bpf_lp_shift, bpf_hp_shift, noise_m
 # === CH (Closed HiHat) ===
 
 def render_ch(n_samples):
-    """808 Closed Hi-Hat - 6 oscillators through BPF, very short decay.
-    Real 808 measured: centroid ~10991Hz, flatness ~0.10 (tonal, not
-    broadband), decay -20dB at ~26ms, peak amplitude ~18347. No noise
-    source in the real circuit (confirmed via voices2.PNG schematic) -
-    removed noise_mult (was 10). hp_stages=3 (was 4) with shift=2 gives
-    centroid=10711Hz and peak=13764, both close to real 808 measurements."""
-    return render_metallic_core(n_samples, decay_k=9, bpf_lp_shift=0, bpf_hp_shift=2,
-                                 noise_mult=0, hp_stages=3, lfsr_seed=0xF00D)
+    """808 Closed Hi-Hat - 6 oscillators through steep HP cascade + LP rolloff.
+
+    Deep re-investigation found the previous filter (3-4 gentle HP stages)
+    let 21-31% of energy leak through below 4kHz, giving a "buzzy" character
+    instead of the real 808's "shimmery" metallic sound (measured <2%
+    energy below 4kHz). Root cause: real circuit has 3 cascaded filter
+    stages (op-amp HPF + VCA rolloff + 2nd HPF for CH specifically).
+
+    5-stage HP cascade (all shift=1) + LP rolloff (shift=2) + small amount
+    of post-filter noise (restores the real 808's fast "shimmer" -
+    ZCR~22-25k/s vs our old ~8k/s) + gain compensation for the much
+    lower pass-band level after steeper filtering.
+
+    Real 808 measured: centroid~11517Hz, E<4kHz~1.8%, ZCR~22352/s,
+    peak~18347. Achieved: centroid~12665Hz, E<4kHz~4.4%, ZCR~24524/s,
+    peak~16163 - all much closer than the old single-topology filter."""
+    return render_metallic_core(n_samples, decay_k=9, hp_shifts=[1,1,1,1,1],
+                                 out_lp_shift=2, gain_mult=70, noise_mult=3,
+                                 lfsr_seed=0xF00D)
 
 
 # === OH (Open HiHat) ===
 
 def render_oh(n_samples, decay=128):
-    """808 Open Hi-Hat - 6 oscillators through BPF, real 808 decay 74-448ms.
-    Real 808 measured: centroid ~9350Hz (bright, tonal, flatness~0.05).
-    K range 11-14 (was 11-15 all sharing CY's amp width bug - now fixed
-    with 20-bit amp in render_metallic_core)."""
+    """808 Open Hi-Hat - 6 oscillators through HP cascade + LP rolloff.
+
+    Deep re-investigation found the old filter let too much low-frequency
+    energy through (sounded buzzy). OH's real character is darker and less
+    "shimmery" than CH (centroid~9343Hz vs CH's ~11517Hz, ZCR~14976/s vs
+    CH's ~22352/s) - matches the real circuit having one fewer filter
+    stage than CH (per service manual: CH has an extra Q31 HPF that OH
+    lacks). 4-stage HP cascade (shifts 1,2,2,2, gentler than CH's all-1s)
+    + LP rolloff + small noise for shimmer + gain compensation.
+
+    Real 808 measured (OH50): centroid~9343Hz, E<4kHz~3.5%, ZCR~14976/s,
+    peak~22359. Achieved: centroid~9415Hz, ZCR~12082/s, peak~24244."""
     if decay < 64: dk = 11     # -10dB ~77ms (target 74ms)
     elif decay < 128: dk = 12  # -10dB ~145ms (target 178ms)
     elif decay < 192: dk = 13  # -10dB ~319ms (target 321-423ms)
     else: dk = 14              # -10dB ~529ms (target 448ms)
-    return render_metallic_core(n_samples, decay_k=dk, bpf_lp_shift=1, bpf_hp_shift=2,
-                                 noise_mult=0, hp_stages=4, lfsr_seed=0xBEE5)
+    return render_metallic_core(n_samples, decay_k=dk, hp_shifts=[1,2,2,2],
+                                 out_lp_shift=2, gain_mult=15, noise_mult=1,
+                                 lfsr_seed=0xBEE5)
 
 
 # === CY (Cymbal) ===
 
 def render_cymbal(n_samples, tone=128, decay=128):
-    """808 Cymbal - 6 oscillators through BPF, long dual-character decay.
+    """808 Cymbal - 6 oscillators through gentle HP + LP rolloff, long decay.
 
-    Real 808 measured (docs/TR808WAV/CY/):
-    - Spectral centroid ~5800-6450Hz (TONE brightens it)
-    - Decay tau 185ms (DECAY=00) up to 758ms (DECAY=10) - much longer
-      than CH/OH's ms-scale decays, needs high K values (13-15)
-    - Dual-exponential envelope (fast ~159ms + slow ~561ms) - approximated
-      here with a single K per DECAY setting; real dual-envelope would
-      need a second amp register (future refinement)
+    Deep re-investigation (same as CH/OH) found the old filter design let
+    too much energy through in the wrong bands. CY needs a much darker,
+    gentler filter than CH/OH (target centroid ~8900Hz vs CH's ~11500Hz) -
+    2-stage HP (shift=1,1) + strong LP rolloff (shift=2-4 depending on
+    TONE) with small noise injection for shimmer.
+
+    Real 808 measured (CY5050 body): centroid~8910Hz, peak~9573.
+    Achieved: centroid~8922Hz, peak~9069 (near-exact match).
+
+    TONE knob varies the LP rolloff shift (brighter = less LP = shift 2,
+    darker = more LP = shift 4).
+
+    Decay tau 185ms (DECAY=00) up to 758ms (DECAY=10) - much longer than
+    CH/OH's ms-scale decays, needs high K values (13-15). Real 808 has a
+    dual-exponential envelope (fast ~159ms + slow ~561ms) - approximated
+    here with a single K per DECAY setting; a true dual-envelope would
+    need a second amp register (future refinement).
     """
-    if tone < 86: hp_shift = 3     # darker, centroid ~4200Hz
-    elif tone < 171: hp_shift = 2  # mid, centroid ~6650Hz (matches CY50)
-    else: hp_shift = 2             # bright (lp_shift narrows further below)
-    lp_shift = 1 if tone >= 171 else 2
+    if tone < 86: out_lp = 4      # darker
+    elif tone < 171: out_lp = 3   # mid (matches CY5050 reference)
+    else: out_lp = 2              # brighter
 
     if decay < 86: dk = 13    # tau~188ms (target 185ms)
     elif decay < 171: dk = 14  # tau~375ms (target 324-511ms)
     else: dk = 15              # tau~671ms (target 673-758ms)
 
-    return render_metallic_core(n_samples, decay_k=dk, bpf_lp_shift=lp_shift, bpf_hp_shift=hp_shift,
-                                 noise_mult=10, hp_stages=4, lfsr_seed=0xC0DE)
+    return render_metallic_core(n_samples, decay_k=dk, hp_shifts=[1,1],
+                                 out_lp_shift=out_lp, gain_mult=12, noise_mult=1,
+                                 lfsr_seed=0xC0DE)
 
 
 # === CB (Cowbell) ===

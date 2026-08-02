@@ -2,6 +2,19 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+-- 808 Cymbal - 6 oscillators through gentle HP + LP rolloff, long decay.
+--
+-- Deep re-investigation (same as CH/OH) found the old filter design let
+-- too much energy through in the wrong bands. CY needs a much darker,
+-- gentler filter than CH/OH (target centroid ~8900Hz vs CH's ~11500Hz) -
+-- 2-stage HP (shift=1,1) + strong LP rolloff (shift=2-4 depending on
+-- TONE) with small noise injection for shimmer.
+--
+-- Decay tau 185ms (DECAY=00) up to 758ms (DECAY=10) needs high K values
+-- (13-15). 20-bit amp register (widened from 16-bit) prevents the
+-- audible "death click" that a coarser register would cause at these
+-- long decay times.
+
 entity cymbal is
   port (
     clk         : in  std_logic;
@@ -16,34 +29,23 @@ end entity cymbal;
 
 architecture rtl of cymbal is
   signal p0, p1, p2, p3, p4, p5 : unsigned(15 downto 0) := (others => '0');
-  signal amp     : unsigned(19 downto 0) := (others => '0');  -- widened from
-    -- 16 to 20 bits: at K=13-15 (needed for the real 808's 185-758ms decay
-    -- times), a 16-bit amp's floor (2^K = 8192-32768) sits at only -6 to
-    -- -12dB below full scale, causing an audible "death click" when the
-    -- voice cuts out. 20 bits pushes the floor down to -30dB or lower.
+  signal amp     : unsigned(19 downto 0) := (others => '0');
   signal active  : std_logic := '0';
-  -- BPF: 1-stage LP + 4-stage HP. Widened to 18-bit (see hihat.vhd comment
-  -- for rationale -- square-sum + noise can reach +-53118, overflowing a
-  -- 16-bit signed accumulator and causing runaway noise buildup).
-  signal lp_acc : signed(17 downto 0) := (others => '0');
-  signal hp_acc0, hp_acc1, hp_acc2, hp_acc3 : signed(17 downto 0) := (others => '0');
-  -- Broadband noise source (same rationale as hihat.vhd) -- unique seed to
-  -- decorrelate from CH/OH.
+  -- 2-stage HP cascade (shift=1,1), then TONE-variable LP rolloff
+  signal hp_acc0, hp_acc1 : signed(17 downto 0) := (others => '0');
+  signal lp_out_acc : signed(17 downto 0) := (others => '0');
+  -- Post-filter noise source for shimmer
   signal lfsr : std_logic_vector(15 downto 0) := x"C0DE";
 
-  -- TONE: LP shift (brighter at high tone) + HP shift (brighter cymbal
-  -- character than CH/OH -- real 808 CY centroid ~5800-6450Hz measured)
-  signal lp_shift : integer range 1 to 2;
-  signal hp_shift : integer range 2 to 3;
-  -- DECAY: K value 13-15 (real 808 CY decay tau 185-758ms, much longer
-  -- than CH/OH's ms-scale decays)
+  -- TONE: LP rolloff shift (darker=more LP=4, brighter=less LP=2)
+  signal out_lp_shift : integer range 2 to 4;
+  -- DECAY: K value 13-15 (real 808 CY decay tau 185-758ms)
   signal decay_k : integer range 13 to 15;
 begin
-  -- Map tone 0-255: darker below mid, brighter above
-  hp_shift <= 3 when tone < 86 else 2;
-  lp_shift <= 1 when tone >= 171 else 2;
+  out_lp_shift <= 4 when tone < 86 else
+                  3 when tone < 171 else
+                  2;
 
-  -- Map decay 0-255 to K 13..15 (matches measured real 808 tau 185-758ms)
   decay_k <= 13 when decay < 86 else
              14 when decay < 171 else
              15;
@@ -51,13 +53,16 @@ begin
   process(clk)
     variable sq : signed(4 downto 0);
     variable raw : signed(17 downto 0);
+    variable x0, x1 : signed(17 downto 0);
+    variable bp : signed(17 downto 0);
     variable noise_raw : signed(15 downto 0);
-    variable noise_wide : signed(18 downto 0);
     variable noise_scaled : signed(17 downto 0);
-    variable lp_out : signed(17 downto 0);
-    variable x0, x1, x2, x3 : signed(17 downto 0);
-    variable x3_clamped : signed(15 downto 0);
+    variable new_hp0, new_hp1 : signed(17 downto 0);
+    variable new_lp : signed(17 downto 0);
+    variable bp_gained : signed(23 downto 0);
+    variable bp_clamped : signed(15 downto 0);
     variable product : signed(27 downto 0);
+    variable dec_term : unsigned(19 downto 0);
   begin
     if rising_edge(clk) then
       if rst = '1' then
@@ -65,9 +70,8 @@ begin
         p2 <= (others => '0'); p3 <= (others => '0');
         p4 <= (others => '0'); p5 <= (others => '0');
         amp <= (others => '0'); active <= '0';
-        lp_acc <= (others => '0');
         hp_acc0 <= (others => '0'); hp_acc1 <= (others => '0');
-        hp_acc2 <= (others => '0'); hp_acc3 <= (others => '0');
+        lp_out_acc <= (others => '0');
         lfsr <= x"C0DE";
         audio_out <= (others => '0');
       else
@@ -81,7 +85,7 @@ begin
         end if;
 
         if trigger = '1' then
-          active <= '1'; amp <= to_unsigned(1048575, 20);  -- 20-bit full scale
+          active <= '1'; amp <= to_unsigned(1048575, 20);
         end if;
 
         if sample_tick = '1' and active = '1' then
@@ -96,65 +100,59 @@ begin
           raw := shift_left(resize(sq, 18), 12) + shift_left(resize(sq, 18), 10) +
                  shift_left(resize(sq, 18), 8) + shift_left(resize(sq, 18), 6);
 
-          -- Mix in broadband LFSR noise (noise_mult=10, scaled by >>3);
-          -- shift-and-add (10x = 8x+2x) instead of a multiply to avoid
-          -- consuming a MULT18X18 block.
+          -- Mix in broadband LFSR noise BEFORE filtering (noise_mult=1,
+          -- scaled by >>3) - matches sim's render_metallic_core exactly.
           lfsr <= lfsr(14 downto 0) & (lfsr(15) xor lfsr(13) xor lfsr(12) xor lfsr(10));
-          noise_raw := signed(lfsr(14 downto 0) & '0') - to_signed(16384, 16);
-          noise_wide := shift_left(resize(noise_raw, 19), 3) + shift_left(resize(noise_raw, 19), 1);
-          noise_scaled := resize(shift_right(noise_wide, 3), 18);
+          noise_raw := signed(resize(unsigned(lfsr(14 downto 0)), 16)) - to_signed(16384, 16);
+          noise_scaled := resize(shift_right(resize(noise_raw, 18), 3), 18);
           raw := raw + noise_scaled;
 
-          -- BPF: 1-stage LP (variable shift) + 4-stage HP (shift=4) --
-          -- retuned to preserve the injected noise's spectral contribution
-          -- (sim result vs real CY5050.WAV: centroid=6557Hz/flatness=0.60
-          -- vs ref centroid=6924Hz/flatness=0.49).
-          case lp_shift is
-            when 2 => lp_acc <= lp_acc + shift_right(raw - lp_acc, 2);
-            when others => lp_acc <= lp_acc + shift_right(raw - lp_acc, 1);
-          end case;
-          lp_out := lp_acc;
-          case hp_shift is
-            when 3 =>
-              hp_acc0 <= hp_acc0 + shift_right(lp_out - hp_acc0, 3);
-              x0 := lp_out - hp_acc0;
-              hp_acc1 <= hp_acc1 + shift_right(x0 - hp_acc1, 3);
-              x1 := x0 - hp_acc1;
-              hp_acc2 <= hp_acc2 + shift_right(x1 - hp_acc2, 3);
-              x2 := x1 - hp_acc2;
-              hp_acc3 <= hp_acc3 + shift_right(x2 - hp_acc3, 3);
-              x3 := x2 - hp_acc3;
-            when others =>
-              hp_acc0 <= hp_acc0 + shift_right(lp_out - hp_acc0, 2);
-              x0 := lp_out - hp_acc0;
-              hp_acc1 <= hp_acc1 + shift_right(x0 - hp_acc1, 2);
-              x1 := x0 - hp_acc1;
-              hp_acc2 <= hp_acc2 + shift_right(x1 - hp_acc2, 2);
-              x2 := x1 - hp_acc2;
-              hp_acc3 <= hp_acc3 + shift_right(x2 - hp_acc3, 2);
-              x3 := x2 - hp_acc3;
-          end case;
+          -- 2-stage HP cascade (shift=1,1). Uses new_hp variables for
+          -- immediate-update semantics matching sim (see hihat.vhd comment
+          -- for why reading the signal directly here was a critical bug).
+          new_hp0 := hp_acc0 + shift_right(raw - hp_acc0, 1);
+          x0 := raw - new_hp0;
+          hp_acc0 <= new_hp0;
+          new_hp1 := hp_acc1 + shift_right(x0 - hp_acc1, 1);
+          x1 := x0 - new_hp1;
+          hp_acc1 <= new_hp1;
+          bp := x1;
 
-          -- Clamp back to 16-bit before the amplitude multiply.
-          if x3 > 32767 then x3_clamped := to_signed(32767, 16);
-          elsif x3 < -32768 then x3_clamped := to_signed(-32768, 16);
-          else x3_clamped := x3(15 downto 0);
+          -- TONE-variable LP rolloff. Uses new_lp variable for
+          -- immediate-update semantics matching sim.
+          case out_lp_shift is
+            when 4 =>
+              new_lp := lp_out_acc + shift_right(bp - lp_out_acc, 4);
+            when 3 =>
+              new_lp := lp_out_acc + shift_right(bp - lp_out_acc, 3);
+            when others => -- 2
+              new_lp := lp_out_acc + shift_right(bp - lp_out_acc, 2);
+          end case;
+          bp := new_lp;
+          lp_out_acc <= new_lp;
+
+          -- Gain compensation (x12 = x4+x8) for the filter's reduced level.
+          -- Shift-and-add instead of a multiply to save a MULT18X18.
+          bp_gained := shift_left(resize(bp, 24), 2) + shift_left(resize(bp, 24), 3);
+          if bp_gained > 32767 then bp_clamped := to_signed(32767, 16);
+          elsif bp_gained < -32768 then bp_clamped := to_signed(-32768, 16);
+          else bp_clamped := bp_gained(15 downto 0);
           end if;
 
-          product := x3_clamped * signed('0' & amp(19 downto 9));
+          -- Multiply by amplitude (top 11 bits of the 20-bit amp)
+          product := bp_clamped * signed('0' & amp(19 downto 9));
           audio_out <= product(26 downto 11);
 
-          -- Exponential decay with variable K on the 20-bit amp register.
-          -- Force to 0 once the decay term itself is 0.
+          -- Exponential decay with variable K on the 20-bit amp register
           case decay_k is
             when 13 =>
-              if amp(19 downto 13) = "0000000" then amp <= (others => '0');
+              if amp(19 downto 13) = "0000000" then amp <= amp - 1;
               else amp <= amp - ("0000000" & amp(19 downto 13)); end if;
             when 14 =>
-              if amp(19 downto 14) = "000000" then amp <= (others => '0');
+              if amp(19 downto 14) = "000000" then amp <= amp - 1;
               else amp <= amp - ("000000" & amp(19 downto 14)); end if;
             when others => -- 15
-              if amp(19 downto 15) = "00000" then amp <= (others => '0');
+              if amp(19 downto 15) = "00000" then amp <= amp - 1;
               else amp <= amp - ("00000" & amp(19 downto 15)); end if;
           end case;
 
