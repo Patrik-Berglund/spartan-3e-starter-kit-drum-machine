@@ -341,11 +341,22 @@ def render_snare(n_samples, tone=128, snappy=128):
 
 # === LT/MT/HT (Toms) ===
 
-def render_tom(n_samples, tuning=128, g_freq=181):
-    """Sine + exponential pitch dive."""
-    freq_product = g_freq * tuning
-    target_freq = g_freq - (g_freq >> 2) + (freq_product >> 9)
-    freq = target_freq + (target_freq >> 2)  # start 25% higher
+def render_tom(n_samples, tuning=128, freq_min=161, freq_range=53, decay_k=12):
+    """808 Tom - bridged-T oscillator with amplitude-dependent pitch.
+    
+    Circuit: Same as BD - bridged-T with diodes D80/D81.
+    Amplitude-dependent pitch: higher amp -> slightly higher freq (0-4%).
+    
+    Measured from real 808:
+    - LT: 81-100Hz, decay ~198ms (K=12)
+    - MT: 120-160Hz, decay ~120ms (K=11)
+    - HT: 165-220Hz, decay ~90ms (K=10 or 11)
+    
+    freq_min: phase increment at tuning=0
+    freq_range: additional phase increment at tuning=255
+    """
+    # Target frequency from tuning knob (linear mapping)
+    target_freq = freq_min + ((tuning * freq_range) >> 8)
 
     phase = 0; amp = 65535
     out = []
@@ -356,24 +367,22 @@ def render_tom(n_samples, tuning=128, g_freq=181):
         amp_11 = amp >> 5
         product = s * amp_11
         out.append(clamp16(product >> 7))
+
+        # Amplitude-dependent pitch: freq = target + small offset from amplitude
+        freq = target_freq + (amp >> 14)
         phase = (phase + freq) & 0xFFFF
-        # Exponential pitch dive (faster than linear)
-        if freq > target_freq:
-            diff = freq - target_freq
-            step = diff >> 6  # tau ~64 samples = 1.3ms
-            if step < 1: step = 1
-            freq -= step
-        amp = decay_step(amp, 11)  # K=11, tau ~42ms (real 808 toms: 76-111ms to -20dB)
+
+        amp = decay_step(amp, decay_k)
     return out
 
 def render_lt(n_samples, tuning=128):
-    return render_tom(n_samples, tuning, g_freq=165)  # ~82Hz
+    return render_tom(n_samples, tuning, freq_min=109, freq_range=25, decay_k=12)  # 81-100Hz, ~193ms
 
 def render_mt(n_samples, tuning=128):
-    return render_tom(n_samples, tuning, g_freq=181)  # ~135Hz
+    return render_tom(n_samples, tuning, freq_min=161, freq_range=53, decay_k=11)  # 120-160Hz, ~97ms
 
 def render_ht(n_samples, tuning=128):
-    return render_tom(n_samples, tuning, g_freq=295)  # ~220Hz
+    return render_tom(n_samples, tuning, freq_min=221, freq_range=74, decay_k=11)  # 165-220Hz, ~97ms
 
 
 # === Metallic voices: 6 square oscillators + BPF ===

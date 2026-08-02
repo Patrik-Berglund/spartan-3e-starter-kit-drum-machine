@@ -217,19 +217,19 @@ begin
               audio_out => audio_sd);
 
   u_lt : entity work.tom
-    generic map (G_FREQ => to_unsigned(221, 16))
+    generic map (G_FREQ_MIN => to_unsigned(109, 16), G_FREQ_RNG => to_unsigned(25, 16), G_DECAY_K => 12)
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
               trigger => merged_trig(2), tuning => lt_tuning_r,
               audio_out => audio_lt);
 
   u_mt : entity work.tom
-    generic map (G_FREQ => to_unsigned(181, 16))
+    generic map (G_FREQ_MIN => to_unsigned(161, 16), G_FREQ_RNG => to_unsigned(53, 16), G_DECAY_K => 11)
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
               trigger => merged_trig(3), tuning => mt_tuning_r,
               audio_out => audio_mt);
 
   u_ht : entity work.tom
-    generic map (G_FREQ => to_unsigned(295, 16))
+    generic map (G_FREQ_MIN => to_unsigned(221, 16), G_FREQ_RNG => to_unsigned(74, 16), G_DECAY_K => 11)
     port map (clk => clk_50mhz, rst => rst, sample_tick => sample_tick,
               trigger => merged_trig(4), tuning => ht_tuning_r,
               audio_out => audio_ht);
