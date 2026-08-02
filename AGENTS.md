@@ -159,6 +159,44 @@ ser.write(bytes([0x30, 100]))  # BD DECAY = 100
 ser.write(bytes([0x00, 1]))    # Trigger BD
 ```
 
+## Development Workflow (IMPORTANT)
+
+The goal is to match the real TR-808 sound as closely as possible.
+Reference materials are in `docs/`:
+- `docs/808-synthesis-reference.md` — target parameters per voice
+- `docs/TR808WAV/` — real TR-808 samples for A/B comparison
+- `docs/reference-images/` — service manual schematics
+- `docs/reference-text/` — service manual analysis, Gemini voice descriptions
+
+### Sim-first workflow
+
+**Always fix voices in the Python VHDL sim first, then port to VHDL.**
+
+1. Edit `scripts/sim_vhdl.py` — this is the bit-exact integer model of the FPGA
+2. Run `python3 scripts/sim_vhdl.py` to generate WAVs in `scripts/output_vhdl/`
+3. Compare output against real 808 samples (`docs/TR808WAV/`)
+4. Once the sim sounds correct, port the fix to the VHDL source in `src/drums/`
+5. Build (`make`), program (`xc3sprog`), verify on hardware via serial triggers
+
+The sim must always match the VHDL 1:1. If you change VHDL, update the sim.
+If you change the sim, port to VHDL.
+
+### Serial testing on hardware
+
+```python
+import serial
+ser = serial.Serial('/dev/ttyUSB0', 115200)
+ser.write(bytes([0x00, 1]))  # Trigger BD
+```
+
+No `sudo` needed for fxload or xc3sprog on this setup.
+
+### Common issues found across voices
+
+- Phase accumulator values too small for exponential sweeps to work with bit shifts
+- Overflow/wrap bugs invisible in Python (unlimited int) but real on FPGA (fixed width)
+- The `sN()`/`uN()` helpers in sim_vhdl.py exist to catch these — use them
+
 ## Conventions
 
 - Top-level entity is always named `top`

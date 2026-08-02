@@ -68,21 +68,19 @@ def uN(x, width, label=None):
 
 
 def decay_step(amp, k):
-    """Exponential decay: amp -= amp >> k, matching the FIXED VHDL pattern
-    across every voice module. `amp >> k` becomes 0 once amp < 2**k, at
-    which point the naive `amp -= amp >> k` gets PERMANENTLY STUCK (amp
-    never decreases further, never reaching any amp<threshold stop
-    condition below that floor). Confirmed analytically to affect nearly
-    every voice in the design (kick, snare, tom, rimshot, cowbell, clap
-    tail, and hihat/oh/cy at higher K settings) before this fix -- this was
-    very likely the primary cause of "background noise that builds up over
-    time and never recovers" seen on a real oscilloscope, since voices
-    would get stuck active at a small nonzero level forever, continuously
-    contributing to the mixer sum. Fix (mirrored in VHDL): force amp to 0
-    once the decay term itself would be 0."""
+    """Exponential decay: amp -= amp >> k, matching the VHDL pattern.
+    
+    Once amp < 2^k, the shift produces 0 and amp would get stuck forever.
+    Fix: subtract 1 per sample once the exponential term is 0. This gives
+    a smooth linear tail that reaches zero naturally, without the abrupt
+    cutoff that was killing kicks 400ms too early.
+    
+    The voice's `amp < 64` (or similar threshold) check handles deactivation.
+    """
     dec = amp >> k
     if dec == 0:
-        return 0
+        # Linear tail: subtract 1 per sample until zero
+        return max(0, amp - 1)
     return amp - dec
 
 # 256-entry sine table, 12-bit signed (matches sine_table.vhd)
@@ -115,37 +113,125 @@ def signed_rshift(val, n):
 # === BD (Bass Drum) ===
 
 def render_kick(n_samples, tone=128, decay=128):
-    """Exponential pitch sweep from ~113Hz to ~51Hz, exponential amplitude decay.
-    Matches real 808 measured behavior."""
-    # Start/end freq as phase increments
-    # tone=128: start=152 (113Hz), end=68 (51Hz)
-    freq_start = 96 + ((tone >> 4) * 3) + (tone >> 5)
-    freq_end = 68
-    # Exponential pitch sweep: freq approaches freq_end with tau
-    # tau = ~5ms = ~244 samples. Use: freq -= (freq - freq_end) >> 6 each sample
-    # That gives tau = 64 samples = 1.3ms. Too fast.
-    # Use >> 8 for tau = 256 samples = 5.2ms. Good.
-    pitch_shift = 4  # tau ~16 samples = 0.33ms (very fast sweep)
+    """808 kick drum - based on service manual circuit analysis:
+    
+    Circuit: Bridged T-network oscillator (IC12, Q39-Q40)
+    - Self-resonating bandpass filter, inherent frequency ~56Hz
+    - TONE knob (VR6): controls oscillation frequency (lower=lower pitch)
+    - DECAY knob: controls feedback amount → ring time
+    
+    Accent/trigger behavior (Q41-Q43):
+    - On trigger, time constant is halved for ~4ms (one half-cycle)
+    - This doubles the frequency for the first half-cycle → attack "punch"
+    - After 4ms, Q42 turns on and circuit oscillates at inherent frequency
+    - C39/R161 produces a retriggering pulse adding to the transient
+    
+    Service manual specs:
+    - Inherent frequency: 56Hz (at mid TONE)
+    - Decay: SHORT=50ms, MID=300ms, LONG=800ms
+    
+    Measured from real 808 samples (LP filtered):
+    - Cycle 1: ~63Hz (includes the frequency-doubling transient averaged in)
+    - Cycles 2-4: 57→54→52Hz (subtle pitch drop as oscillation settles)
+    - Settled: ~50Hz
+    - The subtle continued drop (63→50Hz) is from the bridged-T's amplitude-
+      dependent frequency behavior (like the toms: higher amp → higher freq
+      due to diode conduction in the feedback network)
+    
+    Implementation:
+    - 24-bit fractional freq for smooth sweep
+    - Start at ~63Hz (doubled for first half-cycle equivalent)
+    - Sweep down to ~50Hz with slow exponential
+    - Initial 1-2 sample transient click for the retrigger pulse
+    
+    Phase increments (16-bit accumulator, 48828Hz SR):
+      63Hz -> inc = 84
+      56Hz -> inc = 75  
+      50Hz -> inc = 67
+    """
+    # TONE controls base frequency:
+    # Real 808 shows very little pitch variation with TONE knob
+    # Based on measurements, settled freq is always ~50Hz regardless of TONE
+    # TONE likely has subtle effect on attack transient and slight pitch change
+    # tone=0: ~53Hz (inc=71), tone=128: ~57Hz (inc=76), tone=255: ~61Hz (inc=81)
+    # Very narrow range matching the real behavior
+    base_inc = 71 + (tone >> 5)  # 71..78 range (53-58Hz)
+    
+    # The initial "doubled" frequency (accent trick - first ~4ms)
+    # ~1.25x base freq based on measurements (63/50 = 1.26)
+    start_inc = base_inc + (base_inc >> 2)
+    
+    freq_end_frac = base_inc << 8
+    freq_start_frac = start_inc << 8
 
-    # Decay K: 10 + decay(7:6)
-    decay_k = 10 + (decay >> 6)
+    # Pitch sweep shift=10: tau=1024 samples=21ms
+    # The amplitude-dependent freq drop is slow (matches 63→57→54→52→50 over 100ms)
+    pitch_shift = 10
 
-    phase = 0; freq = freq_start; amp = 65535
+    # DECAY knob mapping to match real 808 measured times:
+    # 808 DECAY 00: 29ms  -> K=9  (24ms)
+    # 808 DECAY 25: 62ms  -> K=10 (48ms) 
+    # 808 DECAY 50: 280ms -> K=13 (386ms) [overshoot but closer than K=12=193ms]
+    # 808 DECAY 75: 378ms -> K=13 (386ms)
+    # 808 DECAY 10: 686ms -> K=14 (773ms)
+    if decay < 32:
+        decay_k = 9
+    elif decay < 96:
+        decay_k = 10
+    elif decay < 200:
+        decay_k = 13
+    else:
+        decay_k = 14
+
+    # Click transient amplitude (retrigger pulse from C39/R161)
+    # Always present but stronger with accent. For now, moderate click.
+    click_amp = 24000
+
+    phase = 0
+    freq_frac = freq_start_frac
+    amp = 65535
     out = []
-    for _ in range(n_samples):
+    for i in range(n_samples):
         if amp < 64:
             out.append(0); continue
+
+        # Initial retrigger pulse (1-2 samples)
+        if i == 0:
+            out.append(clamp16(click_amp))
+            phase = (phase + (freq_frac >> 8)) & 0xFFFF
+            if freq_frac > freq_end_frac:
+                diff = freq_frac - freq_end_frac
+                step = diff >> pitch_shift
+                if step < 1: step = 1
+                freq_frac -= step
+            amp = decay_step(amp, decay_k)
+            continue
+        elif i == 1:
+            out.append(clamp16(-(click_amp >> 1)))
+            phase = (phase + (freq_frac >> 8)) & 0xFFFF
+            if freq_frac > freq_end_frac:
+                diff = freq_frac - freq_end_frac
+                step = diff >> pitch_shift
+                if step < 1: step = 1
+                freq_frac -= step
+            amp = decay_step(amp, decay_k)
+            continue
+
         s = sine_lookup(phase)
         amp_11 = amp >> 5
         product = s * amp_11
         out.append(clamp16(product >> 7))
-        phase = (phase + freq) & 0xFFFF
-        # Exponential pitch sweep: freq -= (freq - freq_end) >> shift
-        if freq > freq_end:
-            diff = freq - freq_end
+
+        # Phase advance
+        freq_inc = freq_frac >> 8
+        phase = (phase + freq_inc) & 0xFFFF
+
+        # Exponential pitch sweep (amplitude-dependent freq behavior)
+        if freq_frac > freq_end_frac:
+            diff = freq_frac - freq_end_frac
             step = diff >> pitch_shift
             if step < 1: step = 1
-            freq -= step
+            freq_frac -= step
         amp = decay_step(amp, decay_k)
     return out
 
