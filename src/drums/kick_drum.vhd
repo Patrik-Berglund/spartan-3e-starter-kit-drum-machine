@@ -43,10 +43,9 @@ begin
   end_frac <= resize(base_inc, 16) & x"00";
 
   -- DECAY mapping to match real 808 measured times
-  decay_k <= to_unsigned(9, 4) when decay < 32 else
-             to_unsigned(10, 4) when decay < 96 else
-             to_unsigned(13, 4) when decay < 200 else
-             to_unsigned(14, 4);
+  decay_k <= to_unsigned(10, 4) when decay < 48 else
+             to_unsigned(12, 4) when decay < 160 else
+             to_unsigned(13, 4);
 
   -- Shared sine table
   u_sine : entity work.sine_table
@@ -113,13 +112,6 @@ begin
           -- Exponential amplitude decay: amp -= amp >> K
           -- When amp >> K = 0, subtract 1 (smooth linear tail)
           case to_integer(decay_k) is
-            when 9 =>
-              dec_term := "000000000" & amp(15 downto 9);
-              if dec_term = 0 then
-                amp <= amp - 1;
-              else
-                amp <= amp - dec_term;
-              end if;
             when 10 =>
               dec_term := "0000000000" & amp(15 downto 10);
               if dec_term = 0 then
@@ -127,15 +119,15 @@ begin
               else
                 amp <= amp - dec_term;
               end if;
-            when 13 =>
-              dec_term := "0000000000000" & amp(15 downto 13);
+            when 12 =>
+              dec_term := "000000000000" & amp(15 downto 12);
               if dec_term = 0 then
                 amp <= amp - 1;
               else
                 amp <= amp - dec_term;
               end if;
-            when others => -- 14
-              dec_term := "00000000000000" & amp(15 downto 14);
+            when others => -- 13
+              dec_term := "0000000000000" & amp(15 downto 13);
               if dec_term = 0 then
                 amp <= amp - 1;
               else
