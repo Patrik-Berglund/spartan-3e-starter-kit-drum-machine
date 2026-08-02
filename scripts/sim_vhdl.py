@@ -589,25 +589,23 @@ def render_rimshot(n_samples):
 # === CP (Hand Clap) ===
 
 def render_clap(n_samples):
-    """LFSR noise + BPF (1-8kHz), 3-burst envelope then tail.
+    """808 Hand Clap - 4-burst noise through 1kHz bandpass, then decay tail.
+
+    Circuit (voices1.PNG): Reverb envelope gates noise VCA, feeds into
+    HPF -> 1000Hz BPF -> VCA (decay envelope) -> output.
+
+    Real 808 measured burst timing (docs/TR808WAV/CP/CP.WAV):
+    - 4 bursts of ~5ms each, ~5ms gaps between (NOT silent - filter rings)
+    - Total attack phase ~30-35ms
+    - BPF peak ~988Hz, tail decay tau ~40-60ms
 
     FIXED BUG: count matches clap.vhd's `signal count : unsigned(12 downto 0)`
-    (13-bit, max 8191). The original VHDL incremented count every
-    sample_tick while active with NO upper bound -- confirmed via the sN/uN
-    fixed-width wrappers that count wraps from 8191 back to 0 roughly every
-    ~170ms of sustained activity (11 wraps in a 2-second render). Once
-    wrapped, the burst-gate logic (`c < 244` etc.) re-evaluates true again,
-    re-firing the attack bursts indefinitely -- and since `active` only
-    clears when `amp<64 AND count>=2196`, a wrap back below 2196 can
-    prevent `active` from ever clearing, making clap play forever after a
-    single trigger. This was very likely a major contributor to the
-    "background noise that builds up over a few seconds and never
-    recovers" observed on a real oscilloscope tonight (clap is in the
-    demo pattern at step 10, well within reach of this bug).
-    FIX: clamp count so it holds at its max meaningful value (2196, the
-    start of the tail) once reached, instead of continuing to free-run
-    toward the register's own 13-bit ceiling. This matches the VHDL fix
-    (add a saturating check on count's increment) applied in clap.vhd.
+    (13-bit, max 8191). Clamped to hold at 2196 (tail start) to prevent
+    wraparound re-firing the attack bursts indefinitely.
+
+    Gate applies to the NOISE INPUT (not the BPF output), so the filter
+    continues to ring naturally during gaps instead of hard-cutting to
+    silence.
     """
     lfsr = 0xBEEF; lp_acc = 0; hp_acc = 0; amp = 65535; count = 0
     out = []
@@ -618,29 +616,35 @@ def render_clap(n_samples):
         if count < 2196:
             count = uN(count + 1, 13, label='clap.count')
         c = count
-        # Burst pattern
-        if   c < 244:  gate = True
-        elif c < 976:  gate = False
-        elif c < 1220: gate = True
-        elif c < 1952: gate = False
-        elif c < 2196: gate = True
-        else:          gate = True  # tail
-        # Wideband noise
-        noise_raw = (lfsr & 0x7FFF) - 16384  # 15-bit signed
-        # BPF: LP at ~8kHz (shift 1) then HP at ~1kHz (shift 3)
-        lp_acc = sN(lp_acc + signed_rshift(noise_raw - lp_acc, 1), 16, label='clap.lp_acc')
-        hp_acc = sN(hp_acc + signed_rshift(lp_acc - hp_acc, 3), 16, label='clap.hp_acc')
+        # Burst pattern: 4 x 5ms bursts with 5ms gaps (244 samples = 5ms)
+        if   c < 244:  gate = True   # burst 1
+        elif c < 488:  gate = False  # gap 1
+        elif c < 732:  gate = True   # burst 2
+        elif c < 976:  gate = False  # gap 2
+        elif c < 1220: gate = True   # burst 3
+        elif c < 1464: gate = False  # gap 3
+        elif c < 1708: gate = True   # burst 4
+        else:          gate = True   # tail
+
+        # Noise source (matches VHDL: 12-bit signed, shifted left 3)
+        noise_12 = (lfsr & 0x0FFF)
+        if noise_12 >= 2048: noise_12 -= 4096
+        noise_raw = sN(noise_12 << 3, 16, label='clap.noise_raw')
+
+        # Gate applied to noise INPUT (filter keeps ringing during gaps)
+        noise_gated = noise_raw if gate else 0
+
+        # BPF: LP shift 3 (~1kHz) then HP shift 4 (~500Hz) - matches VHDL
+        lp_acc = sN(lp_acc + signed_rshift(noise_gated - lp_acc, 3), 16, label='clap.lp_acc')
+        hp_acc = sN(hp_acc + signed_rshift(lp_acc - hp_acc, 4), 16, label='clap.hp_acc')
         bp = lp_acc - hp_acc
-        if gate:
-            bp_16 = max(-32768, min(32767, bp))
-            amp_11 = amp >> 5
-            product = bp_16 * amp_11
-            out.append(clamp16(product >> 11))
-        else:
-            out.append(0)
+
+        amp_11 = amp >> 5
+        product = bp * amp_11
+        out.append(clamp16(product >> 8))
+
         if c >= 2196:
-            amp = decay_step(amp, 12)  # K=12, tau ~84ms (matches clap.vhd; was
-            # incorrectly K=11 in this docstring/comment previously)
+            amp = decay_step(amp, 9)  # K=9, tau~10ms (-20dB at ~25ms, matches measured 29ms)
     return out
 
 

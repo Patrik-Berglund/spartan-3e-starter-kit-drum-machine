@@ -22,6 +22,7 @@ architecture rtl of clap is
 begin
   process(clk)
     variable noise_raw : signed(15 downto 0);
+    variable noise_gated : signed(15 downto 0);
     variable bp_out : signed(15 downto 0);
     variable product : signed(27 downto 0);
     variable c : integer;
@@ -57,36 +58,48 @@ begin
           end if;
           c := to_integer(count);
 
-          -- Burst pattern per service manual Figure 13
+          -- Burst pattern: 4 x 5ms bursts with 5ms gaps (244 samples=5ms)
+          -- Matches real 808 measured timing (docs/TR808WAV/CP/CP.WAV)
           if    c < 244  then gate := '1';   -- burst 1
-          elsif c < 976  then gate := '0';   -- gap
-          elsif c < 1220 then gate := '1';   -- burst 2
-          elsif c < 1952 then gate := '0';   -- gap
-          elsif c < 2196 then gate := '1';   -- burst 3
+          elsif c < 488  then gate := '0';   -- gap 1
+          elsif c < 732  then gate := '1';   -- burst 2
+          elsif c < 976  then gate := '0';   -- gap 2
+          elsif c < 1220 then gate := '1';   -- burst 3
+          elsif c < 1464 then gate := '0';   -- gap 3
+          elsif c < 1708 then gate := '1';   -- burst 4
           else                gate := '1';   -- tail
           end if;
 
-          -- Bandpass filtered noise (~1000Hz)
+          -- Bandpass filtered noise (~1000Hz). Gate applied to noise INPUT
+          -- (not output) so filter continues to ring naturally in gaps.
           noise_raw := shift_left(resize(signed(lfsr(11 downto 0)), 16), 3);
-          lp_acc <= lp_acc + shift_right(noise_raw - lp_acc, 3);
+          if gate = '1' then
+            noise_gated := noise_raw;
+          else
+            noise_gated := (others => '0');
+          end if;
+          lp_acc <= lp_acc + shift_right(noise_gated - lp_acc, 3);
           hp_acc <= hp_acc + shift_right(lp_acc - hp_acc, 4);
           bp_out := lp_acc - hp_acc;
 
-          if gate = '1' then
-            product := bp_out * signed('0' & amp(15 downto 5));
-            audio_out <= product(26 downto 11);
+          product := bp_out * signed('0' & amp(15 downto 5));
+          -- product>>8, then saturate to 16-bit (matches sim's clamp16)
+          if product(27 downto 8) > 32767 then
+            audio_out <= to_signed(32767, 16);
+          elsif product(27 downto 8) < -32768 then
+            audio_out <= to_signed(-32768, 16);
           else
-            audio_out <= (others => '0');
+            audio_out <= resize(shift_right(product, 8)(15 downto 0), 16);
           end if;
 
-          -- Exponential decay only during tail K=12 (tau ~84ms). Force to
-          -- 0 once the decay term itself is 0 -- K=12 floor is 4096, above
-          -- the old amp<64 threshold, so amp would get permanently stuck
-          -- without this (compounding with the count wraparound bug above
-          -- to make clap play forever after a single trigger).
+          -- Exponential decay only during tail K=9 (tau ~10ms, -20dB at
+          -- ~25ms, matches measured 29ms real 808 tail). Force to 0 once
+          -- the decay term itself is 0 (K=9 floor is 512, above the old
+          -- amp<64 threshold, so amp would get permanently stuck without
+          -- this).
           if c >= 2196 then
-            if amp(15 downto 12) = "0000" then amp <= (others => '0');
-            else amp <= amp - ("000000000000" & amp(15 downto 12)); end if;
+            if amp(15 downto 9) = "0000000" then amp <= (others => '0');
+            else amp <= amp - ("0000000" & amp(15 downto 9)); end if;
             if amp < 64 then active <= '0'; end if;
           end if;
         elsif active = '0' then
