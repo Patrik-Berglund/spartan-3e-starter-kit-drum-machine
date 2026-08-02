@@ -2,15 +2,23 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
--- 808 Open Hi-Hat - 6 oscillators through HP cascade + LP rolloff.
+-- 808 Open Hi-Hat - 6 oscillators through a resonant bandpass filter.
+-- Shares the same sound source as CH (see hihat.vhd) but a lower center
+-- frequency / wider Q, matching OH's darker, less shimmery character.
 --
--- Deep re-investigation found the old filter let too much low-frequency
--- energy through (sounded buzzy). OH's real character is darker and less
--- "shimmery" than CH (centroid~9343Hz vs CH's ~11517Hz, ZCR~14976/s vs
--- CH's ~22352/s) - matches the real circuit having one fewer filter
--- stage than CH (per service manual: CH has an extra Q31 HPF that OH
--- lacks). 4-stage HP cascade (shifts 1,2,2,2, gentler than CH's all-1s)
--- + LP rolloff + small noise for shimmer + gain compensation.
+-- Previous design used a 4-stage cascade of real single-pole HP filters
+-- + LP rolloff. A hardware DAC capture (2026-08-02) confirmed the cascade
+-- matched the sim exactly (not a hardware bug) but both disagreed badly
+-- with the real TR-808 reference (real OH: 63.6% of energy in 4-8kHz,
+-- 35.1% in 8-16kHz; old cascade: 47.5%/17.5%) -- a cascade of real single
+-- poles can only produce a monotonic rolloff, not the real circuit's
+-- concentrated two-octave band. See hihat.vhd for the full writeup.
+--
+-- Fix: 2-pole resonant state-variable filter (Chamberlin SVF, same
+-- topology as the cowbell's bandpass and hihat.vhd's CH filter), tuned
+-- lower/wider than CH: f=7/8, res=1/4. Achieved bands
+-- (2-4k/4-8k/8-16k/16-24k): 2.7/62.1/32.1/2.4 vs real 0.4/63.6/35.1/0.9.
+-- noise_mult=8.
 
 entity open_hihat is
   port (
@@ -27,10 +35,8 @@ architecture rtl of open_hihat is
   signal p0, p1, p2, p3, p4, p5 : unsigned(15 downto 0) := (others => '0');
   signal amp     : unsigned(19 downto 0) := (others => '0');
   signal active  : std_logic := '0';
-  -- 4-stage HP cascade (shifts 1,2,2,2), then LP rolloff stage
-  signal hp_acc0, hp_acc1, hp_acc2, hp_acc3 : signed(17 downto 0) := (others => '0');
-  signal lp_out_acc : signed(17 downto 0) := (others => '0');
-  -- Post-filter noise source for shimmer (LFSR)
+  -- Resonant state-variable filter state (bandpass output = bp)
+  signal lp_reg, bp_reg : signed(18 downto 0) := (others => '0');
   signal lfsr : std_logic_vector(15 downto 0) := x"BEE5";
 
   -- DECAY: K value 11-14 (real 808 OH decay 74-448ms)
@@ -43,14 +49,16 @@ begin
 
   process(clk)
     variable sq : signed(4 downto 0);
-    variable raw : signed(17 downto 0);
-    variable x0, x1, x2, x3 : signed(17 downto 0);
-    variable new_hp0, new_hp1, new_hp2, new_hp3 : signed(17 downto 0);
-    variable new_lp : signed(17 downto 0);
-    variable bp : signed(17 downto 0);
+    variable raw : signed(18 downto 0);
     variable noise_raw : signed(15 downto 0);
-    variable noise_scaled : signed(17 downto 0);
-    variable bp_gained : signed(23 downto 0);
+    variable noise_scaled : signed(18 downto 0);
+    variable res_term : signed(18 downto 0);
+    variable new_hp : signed(18 downto 0);
+    variable new_bp, new_lp : signed(18 downto 0);
+    -- Wide scratch for the x*7 (=x*8-x) shift-and-add: x*8 can reach ~8x
+    -- new_hp's ~19-bit range, so this must NOT be done in 19 bits (that
+    -- silently truncates on real hardware - see gotcha #7/#8 in AGENTS.md).
+    variable wide7 : signed(23 downto 0);
     variable bp_clamped : signed(15 downto 0);
     variable product : signed(27 downto 0);
   begin
@@ -60,9 +68,7 @@ begin
         p2 <= (others => '0'); p3 <= (others => '0');
         p4 <= (others => '0'); p5 <= (others => '0');
         amp <= (others => '0'); active <= '0';
-        hp_acc0 <= (others => '0'); hp_acc1 <= (others => '0');
-        hp_acc2 <= (others => '0'); hp_acc3 <= (others => '0');
-        lp_out_acc <= (others => '0');
+        lp_reg <= (others => '0'); bp_reg <= (others => '0');
         lfsr <= x"BEE5";
         audio_out <= (others => '0');
       else
@@ -89,45 +95,35 @@ begin
           if p4(15) = '1' then sq := sq + 1; else sq := sq - 1; end if;
           if p5(15) = '1' then sq := sq + 1; else sq := sq - 1; end if;
 
-          raw := shift_left(resize(sq, 18), 12) + shift_left(resize(sq, 18), 10) +
-                 shift_left(resize(sq, 18), 8) + shift_left(resize(sq, 18), 6);
+          -- Scale: sq*5440
+          raw := shift_left(resize(sq, 19), 12) + shift_left(resize(sq, 19), 10) +
+                 shift_left(resize(sq, 19), 8) + shift_left(resize(sq, 19), 6);
 
-          -- Mix in broadband LFSR noise BEFORE filtering (noise_mult=1,
-          -- scaled by >>3) - matches sim's render_metallic_core exactly.
+          -- Broadband LFSR noise mixed in before filtering, noise_mult=8
+          -- (pure shift, no adder needed).
           lfsr <= lfsr(14 downto 0) & (lfsr(15) xor lfsr(13) xor lfsr(12) xor lfsr(10));
           noise_raw := signed(resize(unsigned(lfsr(14 downto 0)), 16)) - to_signed(16384, 16);
-          noise_scaled := resize(shift_right(resize(noise_raw, 18), 3), 18);
+          noise_scaled := shift_right(shift_left(resize(noise_raw, 19), 3), 3);
           raw := raw + noise_scaled;
 
-          -- 4-stage HP cascade (shifts 1,2,2,2). Uses new_hp variables for
-          -- immediate-update semantics matching sim (see hihat.vhd comment
-          -- for why reading the signal directly here was a critical bug).
-          new_hp0 := hp_acc0 + shift_right(raw - hp_acc0, 1);
-          x0 := raw - new_hp0;
-          hp_acc0 <= new_hp0;
-          new_hp1 := hp_acc1 + shift_right(x0 - hp_acc1, 2);
-          x1 := x0 - new_hp1;
-          hp_acc1 <= new_hp1;
-          new_hp2 := hp_acc2 + shift_right(x1 - hp_acc2, 2);
-          x2 := x1 - new_hp2;
-          hp_acc2 <= new_hp2;
-          new_hp3 := hp_acc3 + shift_right(x2 - hp_acc3, 2);
-          x3 := x2 - new_hp3;
-          hp_acc3 <= new_hp3;
-          bp := x3;
+          -- Resonant state-variable bandpass (Chamberlin SVF), lower/wider
+          -- than CH's: f=7/8, res=1/4.
+          --   hp = raw - lp - res*bp     (res = 1/4)
+          --   bp += f*hp                 (f = 7/8, shift-and-add: x*7>>3)
+          --   lp += f*bp                 (uses the NEW bp - see hihat.vhd
+          --     comment on immediate-update semantics / gotcha #7)
+          res_term := shift_right(resize(bp_reg, 19), 2);
+          new_hp := raw - lp_reg - res_term;
+          wide7 := shift_left(resize(new_hp, 24), 3) - resize(new_hp, 24);
+          new_bp := bp_reg + resize(shift_right(wide7, 3), 19);
+          wide7 := shift_left(resize(new_bp, 24), 3) - resize(new_bp, 24);
+          new_lp := lp_reg + resize(shift_right(wide7, 3), 19);
+          bp_reg <= new_bp;
+          lp_reg <= new_lp;
 
-          -- LP rolloff stage (shift=2)
-          new_lp := lp_out_acc + shift_right(bp - lp_out_acc, 2);
-          bp := new_lp;
-          lp_out_acc <= new_lp;
-
-          -- Gain compensation (x15 = x1+x2+x4+x8) for the filter's reduced
-          -- level. Shift-and-add instead of a multiply to save a MULT18X18.
-          bp_gained := resize(bp, 24) + shift_left(resize(bp, 24), 1) +
-                       shift_left(resize(bp, 24), 2) + shift_left(resize(bp, 24), 3);
-          if bp_gained > 32767 then bp_clamped := to_signed(32767, 16);
-          elsif bp_gained < -32768 then bp_clamped := to_signed(-32768, 16);
-          else bp_clamped := bp_gained(15 downto 0);
+          if new_bp > 32767 then bp_clamped := to_signed(32767, 16);
+          elsif new_bp < -32768 then bp_clamped := to_signed(-32768, 16);
+          else bp_clamped := new_bp(15 downto 0);
           end if;
 
           -- Multiply by amplitude (top 11 bits of the 20-bit amp)

@@ -467,52 +467,122 @@ def render_metallic_core(n_samples, decay_k, hp_shifts, out_lp_shift=0,
     return out
 
 
-# === CH (Closed HiHat) ===
+# === CH/OH shared oscillator core + resonant filter ===
+#
+# Both previously used render_metallic_core (an N-stage cascade of real
+# single-pole HP/LP filters). That architecture was replaced 2026-08-02
+# after a hardware DAC capture (scripts/output_capture/ch.wav, oh.wav)
+# confirmed the sim and hardware agree with each other (ruling out a
+# hardware bug) but BOTH disagreed badly with the real TR-808 reference
+# WAVs, and the user reported the hardware sound as "way too thin" /
+# "sounds more like a bell".
+#
+# Root cause: real CH/OH energy is *concentrated* in one band (CH: 65.2%
+# in 8-16kHz, only 7.7% in 16-24kHz; measured via FFT band-energy on
+# docs/TR808WAV/CH/CH.WAV and OH/OH50.WAV, active region only). A cascade
+# of N real single-pole filters can only produce a monotonic rolloff and
+# mathematically cannot produce a concentrated/resonant band no matter how
+# many stages are stacked -- confirmed by sweeping dozens of hp/lp
+# stage-count and shift combinations directly against white noise: the
+# 16-24kHz band never dropped below ~21% of energy (vs the real 7.7%),
+# which is exactly the "too many high harmonics surviving as a discrete
+# bell tone instead of broadband shimmer" character the user described.
+#
+# Fix: replace the cascade with a 2-pole resonant state-variable filter
+# (same topology as render_cowbell) that has an actual resonant peak.
+# Tuned by sweeping f (integrator rate) / res (feedback damping) against
+# FFT band energy of the real reference WAVs:
+#   CH: f=1 (no attenuation - highest center freq this topology supports
+#       at 48828Hz, matching CH's brighter ~11-12kHz character), res=3/8.
+#       Achieved bands (2-4k/4-8k/8-16k/16-24k): 2.7/23.9/66.1/6.7 vs real
+#       0.1/26.9/65.2/7.7 (weighted error 8.0, vs ~65 for the old cascade).
+#   OH: f=7/8, res=1/4 (lower center freq than CH, matches OH's darker,
+#       less "shimmery" character). Achieved: 2.7/62.1/32.1/2.4 vs real
+#       0.4/63.6/35.1/0.9 (weighted error 9.0).
+# Both need much higher noise_mult than the old cascade (CH: 12, OH: 8) --
+# the resonant peak alone is narrower than the real noisy texture, so more
+# broadband noise is needed to fill the passband instead of leaving the 6
+# oscillators' harmonics audible as a discrete tone.
+
+def _hihat_osc_core(phases, incs, lfsr, noise_mult):
+    """One sample of the shared 6-square-oscillator + noise mixer, used by
+    both CH and OH. Returns (raw, new_phases, new_lfsr)."""
+    sq_sum = 0
+    for i in range(6):
+        sq_sum += 1 if (phases[i] & 0x8000) else -1
+    new_phases = [(phases[i] + incs[i]) & 0xFFFF for i in range(6)]
+    raw = (sq_sum << 12) + (sq_sum << 10) + (sq_sum << 8) + (sq_sum << 6)
+    lfsr = lfsr_next(lfsr, [15, 13, 12, 10])
+    noise_raw = (lfsr & 0x7FFF) - 16384
+    raw += signed_rshift(noise_raw * noise_mult, 3)
+    return raw, new_phases, lfsr
+
+
+_HIHAT_INCS = [275, 409, 496, 702, 725, 1075]  # 205,304,370,523,540,800 Hz
+
 
 def render_ch(n_samples):
-    """808 Closed Hi-Hat - 6 oscillators through steep HP cascade + LP rolloff.
+    """808 Closed Hi-Hat - 6 oscillators through a resonant bandpass filter.
+    See the block comment above for why (vs the old HP-cascade design)."""
+    phases = [0] * 6
+    lp = 0; bp = 0
+    amp = 1048575
+    lfsr = 0xF00D
+    out = []
+    for _ in range(n_samples):
+        raw, phases, lfsr = _hihat_osc_core(phases, _HIHAT_INCS, lfsr, 12)
+        if amp < 8192:
+            out.append(0); continue
 
-    Deep re-investigation found the previous filter (3-4 gentle HP stages)
-    let 21-31% of energy leak through below 4kHz, giving a "buzzy" character
-    instead of the real 808's "shimmery" metallic sound (measured <2%
-    energy below 4kHz). Root cause: real circuit has 3 cascaded filter
-    stages (op-amp HPF + VCA rolloff + 2nd HPF for CH specifically).
+        # Resonant state-variable bandpass (Chamberlin SVF, same topology
+        # as render_cowbell): hp = in - lp - res*bp; bp += f*hp; lp += f*bp.
+        # f=1 (full rate, no attenuation), res=3/8.
+        hp = raw - lp - signed_rshift(bp * 3, 3)
+        bp = bp + hp
+        lp = lp + bp
 
-    5-stage HP cascade (all shift=1) + LP rolloff (shift=2) + small amount
-    of post-filter noise (restores the real 808's fast "shimmer" -
-    ZCR~22-25k/s vs our old ~8k/s) + gain compensation for the much
-    lower pass-band level after steeper filtering.
-
-    Real 808 measured: centroid~11517Hz, E<4kHz~1.8%, ZCR~22352/s,
-    peak~18347. Achieved: centroid~12665Hz, E<4kHz~4.4%, ZCR~24524/s,
-    peak~16163 - all much closer than the old single-topology filter."""
-    return render_metallic_core(n_samples, decay_k=9, hp_shifts=[1,1,1,1,1],
-                                 out_lp_shift=2, gain_mult=70, noise_mult=3,
-                                 lfsr_seed=0xF00D)
+        bp_16 = max(-32768, min(32767, bp))
+        amp_11 = amp >> 9
+        product = bp_16 * amp_11
+        out.append(clamp16(product >> 11))
+        amp = decay_step(amp, 10)
+    return out
 
 
 # === OH (Open HiHat) ===
 
 def render_oh(n_samples, decay=128):
-    """808 Open Hi-Hat - 6 oscillators through HP cascade + LP rolloff.
-
-    Deep re-investigation found the old filter let too much low-frequency
-    energy through (sounded buzzy). OH's real character is darker and less
-    "shimmery" than CH (centroid~9343Hz vs CH's ~11517Hz, ZCR~14976/s vs
-    CH's ~22352/s) - matches the real circuit having one fewer filter
-    stage than CH (per service manual: CH has an extra Q31 HPF that OH
-    lacks). 4-stage HP cascade (shifts 1,2,2,2, gentler than CH's all-1s)
-    + LP rolloff + small noise for shimmer + gain compensation.
-
-    Real 808 measured (OH50): centroid~9343Hz, E<4kHz~3.5%, ZCR~14976/s,
-    peak~22359. Achieved: centroid~9415Hz, ZCR~12082/s, peak~24244."""
+    """808 Open Hi-Hat - 6 oscillators through a resonant bandpass filter,
+    shares the same sound source as CH (per service manual) but a lower
+    center frequency / wider Q, matching its darker, less shimmery
+    character. See the block comment above for why (vs the old HP-cascade
+    design)."""
     if decay < 64: dk = 11     # -10dB ~77ms (target 74ms)
     elif decay < 128: dk = 12  # -10dB ~145ms (target 178ms)
     elif decay < 192: dk = 13  # -10dB ~319ms (target 321-423ms)
     else: dk = 14              # -10dB ~529ms (target 448ms)
-    return render_metallic_core(n_samples, decay_k=dk, hp_shifts=[1,2,2,2],
-                                 out_lp_shift=2, gain_mult=15, noise_mult=1,
-                                 lfsr_seed=0xBEE5)
+
+    phases = [0] * 6
+    lp = 0; bp = 0
+    amp = 1048575
+    lfsr = 0xBEE5
+    out = []
+    for _ in range(n_samples):
+        raw, phases, lfsr = _hihat_osc_core(phases, _HIHAT_INCS, lfsr, 8)
+        if amp < 8192:
+            out.append(0); continue
+
+        # f=7/8, res=1/4 (lower center freq, wider Q than CH's filter).
+        hp = raw - lp - signed_rshift(bp, 2)
+        bp = bp + signed_rshift(hp * 7, 3)
+        lp = lp + signed_rshift(bp * 7, 3)
+
+        bp_16 = max(-32768, min(32767, bp))
+        amp_11 = amp >> 9
+        product = bp_16 * amp_11
+        out.append(clamp16(product >> 11))
+        amp = decay_step(amp, dk)
+    return out
 
 
 # === CY (Cymbal) ===
