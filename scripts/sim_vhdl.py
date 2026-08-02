@@ -479,13 +479,16 @@ def render_ch(n_samples):
 # === OH (Open HiHat) ===
 
 def render_oh(n_samples, decay=128):
-    if decay < 52: dk = 11
-    elif decay < 103: dk = 12
-    elif decay < 154: dk = 13
-    elif decay < 205: dk = 14
-    else: dk = 15
-    return render_metallic_core(n_samples, decay_k=dk, bpf_lp_shift=0, bpf_hp_shift=2,
-                                 noise_mult=10, hp_stages=4, lfsr_seed=0xBEE5)
+    """808 Open Hi-Hat - 6 oscillators through BPF, real 808 decay 74-448ms.
+    Real 808 measured: centroid ~9350Hz (bright, tonal, flatness~0.05).
+    K range 11-14 (was 11-15 all sharing CY's amp width bug - now fixed
+    with 20-bit amp in render_metallic_core)."""
+    if decay < 64: dk = 11     # -10dB ~77ms (target 74ms)
+    elif decay < 128: dk = 12  # -10dB ~145ms (target 178ms)
+    elif decay < 192: dk = 13  # -10dB ~319ms (target 321-423ms)
+    else: dk = 14              # -10dB ~529ms (target 448ms)
+    return render_metallic_core(n_samples, decay_k=dk, bpf_lp_shift=1, bpf_hp_shift=2,
+                                 noise_mult=0, hp_stages=4, lfsr_seed=0xBEE5)
 
 
 # === CY (Cymbal) ===
