@@ -168,20 +168,19 @@ def render_kick(n_samples, tone=128, decay=128):
     # The amplitude-dependent freq drop is slow (matches 63→57→54→52→50 over 100ms)
     pitch_shift = 10
 
-    # DECAY knob mapping to match real 808 measured times:
-    # 808 DECAY 00: 29ms  -> K=9  (24ms)
-    # 808 DECAY 25: 62ms  -> K=10 (48ms) 
-    # 808 DECAY 50: 280ms -> K=13 (386ms) [overshoot but closer than K=12=193ms]
-    # 808 DECAY 75: 378ms -> K=13 (386ms)
-    # 808 DECAY 10: 686ms -> K=14 (773ms)
-    if decay < 32:
-        decay_k = 9
-    elif decay < 96:
+    # DECAY knob mapping to match real 808 measured times (using -10dB/2ms
+    # smoothed measurement matching compare_voice.py's method):
+    # 808 DECAY 00: 18ms  -> K=10 (19ms)
+    # 808 DECAY 25: 22ms  -> K=10 (19ms) [closest available]
+    # 808 DECAY 50: 60ms  -> K=12 (54ms)
+    # 808 DECAY 75: 78ms  -> K=13 (107ms) [overshoots, no clean K between 12/13]
+    # 808 DECAY 10: 155ms -> K=13 (107ms) [undershoots, K=14=242ms overshoots more]
+    if decay < 48:
         decay_k = 10
-    elif decay < 200:
-        decay_k = 13
+    elif decay < 160:
+        decay_k = 12
     else:
-        decay_k = 14
+        decay_k = 13
 
     # Click transient amplitude (retrigger pulse from C39/R161)
     # Always present but stronger with accent. For now, moderate click.
