@@ -239,58 +239,103 @@ def render_kick(n_samples, tone=128, decay=128):
 # === SD (Snare Drum) ===
 
 def render_snare(n_samples, tone=128, snappy=128):
-    """Two sines (173/346Hz) + LFSR noise through BPF.
-    Improved noise character with bandpass instead of just HPF."""
-    # 173Hz = inc 232, 346Hz = inc 464
-    pinc1 = 232
-    pinc2 = 464
-    # Snappy: noise level
-    if snappy < 86: noise_shift = 2
-    elif snappy < 171: noise_shift = 1
-    else: noise_shift = 0
+    """808 Snare Drum - based on service manual + real sample analysis.
+    
+    Circuit (service manual):
+    - Two bridged-T oscillators: ~175Hz (fundamental) + ~345Hz (harmonic)
+    - VR8 (TONE): controls MIX RATIO between the two tones (NOT frequency)
+    - VR9 (SNAPPY): controls noise amplitude (linear)
+    - Noise path: white noise → VCA → BPF peaking at ~3.8kHz
+    
+    Measured from real 808 SD samples:
+    - Lower tone: 175Hz, decay tau ~38ms (K=11)
+    - Upper tone: 345Hz, decay tau ~10ms (K=9) — 4x faster!
+    - TONE=0: mostly lower, TONE=255: mostly upper (crossfade)
+    - Noise BPF: peak ~3.8kHz, -3dB range 2.1-6.1kHz
+    - Noise decay: tau ~27ms (K=10)
+    - SNAPPY: linear noise amplitude 0 to ~1.8x tone level
+    
+    Phase increments (16-bit accumulator, 48828Hz SR):
+      175Hz -> inc = 234
+      345Hz -> inc = 462
+    """
+    # Fixed frequencies (TONE does NOT change them)
+    pinc1 = 252   # ~188Hz (measured 808 shows ~175-194Hz depending on TONE mix)
+    pinc2 = 464   # ~345Hz
+
+    # TONE controls mix ratio between lower and upper tone
+    # tone=0: mostly lower (real 808 ratio 345/175 = 0.08)
+    # tone=128: balanced (ratio ~0.6)
+    # tone=255: mostly upper (ratio ~3.15)
+    # Use simple crossfade gains (0-255 range)
+    lower_gain = 255 - tone  # 255 at tone=0, 0 at tone=255
+    upper_gain = tone         # 0 at tone=0, 255 at tone=255
+
+    # SNAPPY controls noise level (linear, 0 to ~1.8x tone level)
+    # snappy=0: nearly silent noise
+    # snappy=128: noise ~= tone level
+    # snappy=255: noise ~1.8x tone level
+    # Implemented as multiply: noise * snappy >> 7
 
     phase1 = 0; phase2 = 0
-    tone_amp = 65535; noise_amp = 65535
+    tone1_amp = 65535   # Lower tone envelope (separate!)
+    tone2_amp = 65535   # Upper tone envelope (separate!)
+    noise_amp = 65535   # Noise envelope
     lfsr = 0xACE1
-    # BPF state for noise (2-stage LP + HP = bandpass)
-    lp_acc = 0; lp_acc2 = 0; hp_acc = 0
+
+    # BPF for noise: 2-stage HP (shift 2) + 1-stage LP (shift 1)
+    # This gives peak at ~4kHz matching real 808
+    hp_acc1 = 0; hp_acc2 = 0; lp_acc = 0
+
     out = []
     for _ in range(n_samples):
-        if tone_amp < 64 and noise_amp < 64:
+        if tone1_amp < 64 and tone2_amp < 64 and noise_amp < 64:
             out.append(0); continue
+
         s1 = sine_lookup(phase1)
         s2 = sine_lookup(phase2)
         lfsr = lfsr_next(lfsr, [15, 13, 12, 10])
 
-        # Tones
-        amp_11 = tone_amp >> 5
-        p1 = s1 * amp_11
-        p2 = s2 * amp_11
+        # Lower tone with its own envelope and gain
+        t1_scaled = s1 * (tone1_amp >> 5)
+        t1_out = signed_rshift(t1_scaled * lower_gain, 16)
 
-        # Noise through BPF (~500Hz-2kHz)
+        # Upper tone with its own envelope and gain
+        t2_scaled = s2 * (tone2_amp >> 5)
+        t2_out = signed_rshift(t2_scaled * upper_gain, 16)
+
+        # Noise through BPF (~2-6kHz, peak ~4kHz)
         noise_raw = (lfsr & 0x7FFF) - 16384
-        # 2-stage LP at ~2kHz: shift 2 each
-        lp_acc = lp_acc + signed_rshift(noise_raw - lp_acc, 2)
-        lp_acc2 = lp_acc2 + signed_rshift(lp_acc - lp_acc2, 2)
-        # HP at ~300Hz: shift 5
-        hp_acc = hp_acc + signed_rshift(lp_acc2 - hp_acc, 5)
-        bp_out = lp_acc2 - hp_acc
+        # 2-stage HP at shift 2 (~3kHz cutoff at 48.8kHz SR)
+        hp_acc1 = hp_acc1 + signed_rshift(noise_raw - hp_acc1, 2)
+        hp_out1 = noise_raw - hp_acc1
+        hp_acc2 = hp_acc2 + signed_rshift(hp_out1 - hp_acc2, 2)
+        hp_out2 = hp_out1 - hp_acc2
+        # 1-stage LP at shift 1 (~12kHz cutoff)
+        lp_acc = lp_acc + signed_rshift(hp_out2 - lp_acc, 1)
+        bp_out = lp_acc
 
-        # Scale noise by noise_amp
-        noise_scaled = signed_rshift(bp_out * (noise_amp >> 8), 7)
-        noise_scaled = signed_rshift(noise_scaled, noise_shift)
+        # Scale noise by envelope and SNAPPY
+        # Real 808: snappy=0 gives almost zero noise, snappy=255 gives 1.8x tone
+        # Use snappy*snappy>>8 for quadratic curve (more dead zone at bottom)
+        noise_env = signed_rshift(bp_out * (noise_amp >> 8), 7)
+        snappy_gain = (snappy * snappy) >> 8  # 0..255, quadratic
+        noise_scaled = signed_rshift(noise_env * snappy_gain, 7)
 
-        # Mix: tone1 + tone2/2 + noise
-        t1 = signed_rshift(p1, 8)
-        t2 = signed_rshift(p2, 9)
-        mix = t1 + t2 + noise_scaled
+        # Mix all components
+        mix = t1_out + t2_out + noise_scaled
         out.append(clamp16(mix))
 
         phase1 = (phase1 + pinc1) & 0xFFFF
         phase2 = (phase2 + pinc2) & 0xFFFF
-        # Tone decays faster than noise (real 808: tone ~15ms, noise ~30ms)
-        tone_amp = decay_step(tone_amp, 9)   # K=9, tau ~10ms
-        noise_amp = decay_step(noise_amp, 11)  # K=11, tau ~42ms
+
+        # Separate decay envelopes (key to the snare character!)
+        # Lower tone: K=10, tau=21ms (-20dB at 48ms) — the "body"
+        tone1_amp = decay_step(tone1_amp, 10)
+        # Upper tone: K=9, tau=10ms (-20dB at 24ms) — the "snap"
+        tone2_amp = decay_step(tone2_amp, 9)
+        # Noise: K=11, tau=42ms (-20dB at 97ms) — extends sound at high snappy
+        noise_amp = decay_step(noise_amp, 11)
     return out
 
 

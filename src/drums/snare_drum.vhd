@@ -2,6 +2,9 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+-- 808 Snare Drum - fixed frequencies, TONE=mix ratio, separate decays
+-- Simplified arithmetic to avoid XST synthesis issues.
+
 entity snare_drum is
   port (
     clk         : in  std_logic;
@@ -16,15 +19,19 @@ end entity snare_drum;
 
 architecture rtl of snare_drum is
   signal phase1, phase2 : unsigned(15 downto 0) := (others => '0');
-  signal lfsr   : std_logic_vector(15 downto 0) := x"ACE1";
-  signal tone_amp  : unsigned(15 downto 0) := (others => '0');
-  signal noise_amp : unsigned(15 downto 0) := (others => '0');
-  signal active : std_logic := '0';
-  -- BPF accumulators for noise
-  signal lp_acc  : signed(15 downto 0) := (others => '0');
-  signal lp_acc2 : signed(15 downto 0) := (others => '0');
-  signal hp_acc  : signed(15 downto 0) := (others => '0');
+  signal lfsr : std_logic_vector(15 downto 0) := x"ACE1";
 
+  signal tone1_amp : unsigned(15 downto 0) := (others => '0');
+  signal tone2_amp : unsigned(15 downto 0) := (others => '0');
+  signal noise_amp : unsigned(15 downto 0) := (others => '0');
+  signal active    : std_logic := '0';
+
+  -- BPF accumulators
+  signal hp_acc1 : signed(15 downto 0) := (others => '0');
+  signal hp_acc2 : signed(15 downto 0) := (others => '0');
+  signal lp_acc  : signed(15 downto 0) := (others => '0');
+
+  -- 64-entry sine table
   type sine_t is array(0 to 63) of signed(11 downto 0);
   constant SINE : sine_t := (
     to_signed(0,12),to_signed(201,12),to_signed(399,12),to_signed(594,12),
@@ -47,104 +54,131 @@ architecture rtl of snare_drum is
 
   signal s1, s2 : signed(11 downto 0);
 
-  -- Param-derived signals
-  -- TONE: controls phase_inc1 range 232-406 (173-303Hz), phase_inc2 = 2*phase_inc1
-  -- tone=0 -> 232, tone=255 -> 406. Delta=174. Approx: 232 + tone(7:1) + tone(7:3)
-  signal pinc1 : unsigned(15 downto 0);
-  signal pinc2 : unsigned(15 downto 0);
-  -- SNAPPY: noise gain shift. snappy=0 -> noise/4, snappy=255 -> noise*1
-  -- Map to noise_shift: 0=shift right 2, 128=shift right 1, 255=no shift
-  signal noise_shift : unsigned(1 downto 0);
-begin
-  -- Tone param -> phase increments
-  pinc1 <= to_unsigned(232, 16) + resize(tone(7 downto 1), 16) + resize(tone(7 downto 3), 16);
-  pinc2 <= shift_left(pinc1, 1);
+  -- Fixed phase increments
+  constant PINC1 : unsigned(15 downto 0) := to_unsigned(252, 16);  -- ~188Hz
+  constant PINC2 : unsigned(15 downto 0) := to_unsigned(464, 16);  -- ~345Hz
 
-  -- Snappy param -> noise shift (0-85: >>2, 86-170: >>1, 171-255: >>0)
-  noise_shift <= "10" when snappy < 86 else
-                 "01" when snappy < 171 else
-                 "00";
+begin
 
   s1 <= SINE(to_integer(phase1(15 downto 10)));
   s2 <= SINE(to_integer(phase2(15 downto 10)));
 
   process(clk)
-    variable p1, p2 : signed(23 downto 0);
-    variable noise_raw  : signed(15 downto 0);
-    variable lp1_next   : signed(15 downto 0);
-    variable lp2_next   : signed(15 downto 0);
-    variable hp_next    : signed(15 downto 0);
-    variable bp_out     : signed(15 downto 0);
-    variable noise_scaled : signed(15 downto 0);
-    variable mix    : signed(16 downto 0);
+    variable p1, p2      : signed(23 downto 0);
+    variable t1_out      : signed(15 downto 0);
+    variable t2_out      : signed(15 downto 0);
+    variable noise_raw   : signed(15 downto 0);
+    variable bp_out      : signed(15 downto 0);
+    variable noise_scaled: signed(15 downto 0);
+    variable mix         : signed(16 downto 0);
+    variable dec1        : unsigned(15 downto 0);
+    variable dec2        : unsigned(15 downto 0);
+    variable decn        : unsigned(15 downto 0);
   begin
     if rising_edge(clk) then
       if rst = '1' then
         phase1 <= (others => '0'); phase2 <= (others => '0');
-        lfsr <= x"ACE1"; tone_amp <= (others => '0');
+        lfsr <= x"ACE1";
+        tone1_amp <= (others => '0'); tone2_amp <= (others => '0');
         noise_amp <= (others => '0'); active <= '0';
-        lp_acc <= (others => '0'); lp_acc2 <= (others => '0');
-        hp_acc <= (others => '0');
+        hp_acc1 <= (others => '0'); hp_acc2 <= (others => '0');
+        lp_acc <= (others => '0');
         audio_out <= (others => '0');
       else
         if trigger = '1' then
           active <= '1';
           phase1 <= (others => '0'); phase2 <= (others => '0');
-          tone_amp  <= to_unsigned(65535, 16);
+          tone1_amp <= to_unsigned(65535, 16);
+          tone2_amp <= to_unsigned(65535, 16);
           noise_amp <= to_unsigned(65535, 16);
         end if;
 
         if sample_tick = '1' and active = '1' then
-          phase1 <= phase1 + pinc1;
-          phase2 <= phase2 + pinc2;
+          phase1 <= phase1 + PINC1;
+          phase2 <= phase2 + PINC2;
           lfsr <= lfsr(14 downto 0) & (lfsr(15) xor lfsr(13) xor lfsr(12) xor lfsr(10));
 
-          -- Tones scaled by tone_amp
-          p1 := s1 * signed('0' & tone_amp(15 downto 5));
-          p2 := s2 * signed('0' & tone_amp(15 downto 5));
-
-          -- Noise: 15-bit signed from LFSR
-          noise_raw := signed(lfsr(14 downto 0) & '0') - to_signed(16384, 16);
-
-          -- BPF: 2-stage LP (shift 2) + 1-stage HP (shift 5)
-          lp1_next := lp_acc + shift_right(noise_raw - lp_acc, 2);
-          lp_acc <= lp1_next;
-          lp2_next := lp_acc2 + shift_right(lp1_next - lp_acc2, 2);
-          lp_acc2 <= lp2_next;
-          hp_next := hp_acc + shift_right(lp2_next - hp_acc, 5);
-          hp_acc <= hp_next;
-          bp_out := lp2_next - hp_next;
-
-          -- Scale noise by noise_amp
-          noise_scaled := resize(shift_right(bp_out * signed('0' & noise_amp(15 downto 8)), 7), 16);
-
-          -- Apply snappy scaling
-          case noise_shift is
-            when "10"   => noise_scaled := shift_right(noise_scaled, 2);
-            when "01"   => noise_scaled := shift_right(noise_scaled, 1);
-            when others => null;
+          -- Lower tone: s1 * tone1_amp(15:5), scaled by (255-tone)
+          -- p1 is 24-bit. Take p1(22:8) = 15-bit signal.
+          -- Then shift right by tone(7:5) to reduce when tone is high.
+          -- Simple approach: tone=0 -> t1 full, tone=255 -> t1 >> 3
+          p1 := s1 * signed('0' & tone1_amp(15 downto 5));
+          -- tone(7:6): 0=full, 1=>>1, 2=>>2, 3=>>3
+          case tone(7 downto 6) is
+            when "00" => t1_out := p1(22 downto 7);
+            when "01" => t1_out := p1(22) & p1(22 downto 8);
+            when "10" => t1_out := p1(22) & p1(22) & p1(22 downto 9);
+            when others => t1_out := p1(22) & p1(22) & p1(22) & p1(22 downto 10);
           end case;
 
-          -- Mix: tone1 >> 8 + tone2 >> 9 + noise_scaled
-          mix := resize(p1(22 downto 8), 17) + resize(p2(22 downto 9), 17) +
-                 resize(noise_scaled, 17);
+          -- Upper tone: s2 * tone2_amp(15:5), scaled by tone
+          -- tone=0 -> t2 >> 3, tone=255 -> t2 full
+          p2 := s2 * signed('0' & tone2_amp(15 downto 5));
+          case tone(7 downto 6) is
+            when "00" => t2_out := p2(22) & p2(22) & p2(22) & p2(22 downto 10);
+            when "01" => t2_out := p2(22) & p2(22) & p2(22 downto 9);
+            when "10" => t2_out := p2(22) & p2(22 downto 8);
+            when others => t2_out := p2(22 downto 7);
+          end case;
 
+          -- Noise from LFSR (signed 15-bit)
+          noise_raw := signed(lfsr(14 downto 0) & '0') - to_signed(16384, 16);
+
+          -- BPF: 2-stage HP (shift 2) + 1-stage LP (shift 1)
+          -- HP stage 1
+          hp_acc1 <= hp_acc1 + shift_right(noise_raw - hp_acc1, 2);
+          -- HP stage 2 (input = noise_raw - hp_acc1)
+          hp_acc2 <= hp_acc2 + shift_right((noise_raw - hp_acc1) - hp_acc2, 2);
+          -- LP stage (input = hp2_out = (noise_raw-hp_acc1) - hp_acc2 roughly)
+          bp_out := lp_acc;
+          lp_acc <= lp_acc + shift_right(((noise_raw - hp_acc1) - hp_acc2) - lp_acc, 1);
+
+          -- Scale noise: bp_out * noise_amp(15:8) >> 7
+          noise_scaled := resize(
+            shift_right(bp_out * signed('0' & noise_amp(15 downto 8)), 7),
+            16);
+
+          -- Apply snappy: shift based on snappy level
+          -- snappy(7:6): 0=>>3(quiet), 1=>>2, 2=>>1, 3=full
+          case snappy(7 downto 6) is
+            when "00" => noise_scaled := shift_right(noise_scaled, 3);
+            when "01" => noise_scaled := shift_right(noise_scaled, 2);
+            when "10" => noise_scaled := shift_right(noise_scaled, 1);
+            when others => null;  -- full level
+          end case;
+
+          -- Mix
+          mix := resize(t1_out, 17) + resize(t2_out, 17) + resize(noise_scaled, 17);
           if mix > 32767 then audio_out <= to_signed(32767, 16);
           elsif mix < -32768 then audio_out <= to_signed(-32768, 16);
-          else audio_out <= mix(15 downto 0);
+          else audio_out <= mix(15 downto 0); end if;
+
+          -- Decay envelopes with linear tail
+          -- Only decay if amp >= 64 (prevent unsigned underflow wrap!)
+          -- Lower tone: K=10
+          if tone1_amp >= 64 then
+            dec1 := "0000000000" & tone1_amp(15 downto 10);
+            if dec1 = 0 then tone1_amp <= tone1_amp - 1;
+            else tone1_amp <= tone1_amp - dec1; end if;
           end if;
 
-          -- Exponential decay: tone K=9, noise K=11. Force to 0 once the
-          -- decay term itself is 0 (see kick_drum.vhd comment for why --
-          -- K=9/K=11 floors of 512/2048 are both above the old amp<64
-          -- threshold, so both amps would get permanently stuck without
-          -- this fix).
-          if tone_amp(15 downto 9) = "0000000" then tone_amp <= (others => '0');
-          else tone_amp <= tone_amp - ("000000000" & tone_amp(15 downto 9)); end if;
-          if noise_amp(15 downto 11) = "00000" then noise_amp <= (others => '0');
-          else noise_amp <= noise_amp - ("00000000000" & noise_amp(15 downto 11)); end if;
+          -- Upper tone: K=9
+          if tone2_amp >= 64 then
+            dec2 := "000000000" & tone2_amp(15 downto 9);
+            if dec2 = 0 then tone2_amp <= tone2_amp - 1;
+            else tone2_amp <= tone2_amp - dec2; end if;
+          end if;
 
-          if tone_amp < 64 and noise_amp < 64 then active <= '0'; end if;
+          -- Noise: K=11
+          if noise_amp >= 64 then
+            decn := "00000000000" & noise_amp(15 downto 11);
+            if decn = 0 then noise_amp <= noise_amp - 1;
+            else noise_amp <= noise_amp - decn; end if;
+          end if;
+
+          if tone1_amp < 64 and tone2_amp < 64 and noise_amp < 64 then
+            active <= '0';
+          end if;
         elsif active = '0' then
           audio_out <= (others => '0');
         end if;
