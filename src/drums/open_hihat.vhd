@@ -84,6 +84,11 @@ begin
         if trigger = '1' then
           active <= '1';
           amp <= to_unsigned(1048575, 20);
+          -- Reset filter state every hit - see hihat.vhd for why (resonant
+          -- SVF state carrying over between hits could occasionally kick
+          -- the filter into a self-sustaining full-scale oscillation).
+          lp_reg <= (others => '0');
+          bp_reg <= (others => '0');
         end if;
 
         if sample_tick = '1' and active = '1' then

@@ -74,6 +74,17 @@ begin
         if trigger = '1' then
           active <= '1';
           amp <= to_unsigned(1048575, 20);
+          -- Reset filter state every hit. Without this, the resonant SVF's
+          -- leftover bp/lp from the previous hit carries forward (only
+          -- global rst cleared it) - on real hardware this occasionally
+          -- kicked the filter into a self-sustaining near-full-scale
+          -- oscillation ("ice pick on a metal anvil" - hard clipping at a
+          -- single ringing high frequency instead of broadband shimmer)
+          -- depending on exactly what state a previous hit happened to
+          -- leave behind. A trigger from a clean zero state was always
+          -- well-behaved, so force every hit to start from that state.
+          lp_reg <= (others => '0');
+          bp_reg <= (others => '0');
         end if;
 
         if sample_tick = '1' and active = '1' then

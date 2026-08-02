@@ -127,17 +127,32 @@ Voice indices: 0=BD, 1=SD, 2=LT, 3=MT, 4=HT, 5=RS, 6=CP, 7=CB, 8=CY, 9=OH, 10=CH
 - Output: 12-bit mono via SPI DAC (LTC2624 channel A)
 - Signal path: 256-entry sine table + interpolation → MULT18x18 → 18-bit internal → 12-bit DAC
 - No LPF on sine-based voices (kick, toms, snare tones, rimshot)
-- 6 square oscillators + 4-stage HPF for metallic voices (hihats, cymbal)
+- 6 square oscillators for metallic voices (hihats, cymbal):
+  - CH/OH: 2-pole resonant state-variable bandpass filter (Chamberlin SVF,
+    same topology as the cowbell) — see `src/drums/hihat.vhd` /
+    `open_hihat.vhd`. A cascade of real single-pole HP/LP stages (the
+    original design) can only produce a monotonic rolloff and can never
+    reproduce the real 808's *concentrated* spectral band (CH: 65% of
+    energy in 8-16kHz, 7.7% in 16-24kHz) — confirmed by sweeping dozens of
+    stage/shift combinations against the real reference WAVs. Only a
+    resonant (peaked) filter can do this.
+  - CY still uses the older N-stage HP-cascade + LP-rolloff design
+    (`render_metallic_core` in `scripts/sim_vhdl.py`) — not yet ported to
+    the resonant-filter approach.
 
 ## Resource Usage
 
 | Resource | Used | Available | % |
 |----------|------|-----------|---|
-| Slices | 3,328 | 4,656 | 71% |
+| Slices | 3,036 | 4,656 | 65% |
 | MULT18x18 | 19 | 20 | 95% |
 | BRAM | 14 | 20 | 70% |
-| Flip-flops | 2,188 | 9,312 | 23% |
-| LUTs | 6,259 | 9,312 | 67% |
+| Flip-flops | 2,068 | 9,312 | 22% |
+| LUTs | 5,676 | 9,312 | 60% |
+
+(Slices/FFs/LUTs dropped from the previous 71%/23%/67% after CH/OH moved
+from a 5-9 stage HP/LP cascade to a 2-pole resonant filter — fewer
+registers and adders needed per voice.)
 
 **MULT18x18 is nearly exhausted (95%).** Adding any new multiply (e.g. a
 gain compensation stage) will likely need to be converted to shift-and-add
@@ -298,3 +313,27 @@ No `sudo` needed for fxload or xc3sprog on this setup.
    synthesis reports 0 errors. The fix is to free a multiplier (e.g.
    convert a constant multiply to shift-and-add), not to debug the netlist
    pattern itself — the error is in the ISE 14.7 placer, not the design.
+7. **Resonant filter state must be reset on every trigger, not just on
+   global `rst`** — CH/OH's 2-pole resonant SVF (`bp_reg`/`lp_reg` in
+   `hihat.vhd`/`open_hihat.vhd`) carried its state forward between hits by
+   only clearing on `rst`. On real hardware, after enough retriggers the
+   leftover state could occasionally kick the filter into a self-sustaining
+   near-full-scale oscillation — audibly a clean ringing "ice pick on a
+   metal anvil" tone (hard clipping at a single high frequency) instead of
+   the intended broadband shimmer. Reproduced with ~2-3 back-to-back
+   triggers on hardware; NOT visible in single-hit sim testing, since each
+   sim render call already starts from a fresh zero state (only multi-
+   trigger sequences on real hardware exposed it). Fix: reset `bp_reg`/
+   `lp_reg` to 0 in the same `if trigger = '1'` block that resets `amp`.
+   Any future resonant/feedback filter design in this project should reset
+   its state on every trigger for the same reason — a damped, non-resonant
+   cascade (the old CH/OH/CY design) doesn't have this failure mode since
+   it always decays toward zero on its own, but a resonant filter (bp/lp
+   feeding back into itself) can retain energy indefinitely.
+8. **Known issue: CY (cymbal) doesn't meet 50MHz timing** — pre-existing,
+   confirmed present before the CH/OH resonant-filter rework (150 failing
+   paths / -12.7ns worst slack in `build/top_timing.twr` from before that
+   change; grew to ~190-200 failing paths / -17.6ns after, apparently from
+   added routing congestion elsewhere on the chip, though none of the
+   failing paths are in CH/OH). All failing paths are inside `u_cy`. Not
+   yet root-caused or fixed - worth a dedicated look.
