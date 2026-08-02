@@ -75,6 +75,8 @@ architecture rtl of top is
   signal capture_tx_ready : std_logic;
   signal capture_state    : std_logic_vector(2 downto 0);
   signal any_trig         : std_logic;
+  signal capture_offset_hi : unsigned(7 downto 0) := (others => '0');
+  signal capture_offset_lo : unsigned(7 downto 0) := (others => '0');
 
   -- Sequencer triggers merged with register map triggers
   signal merged_trig : std_logic_vector(10 downto 0);
@@ -141,13 +143,19 @@ begin
     port map (clk => clk_50mhz, rst => rst, rx => serial_rx,
               wr_en => uart_wr_en, wr_addr => uart_wr_addr, wr_data => uart_wr_data);
 
-  -- Capture command detection: addr 0x7D = arm, addr 0x7E = dump
+  -- Capture command detection: addr 0x7B=offset_hi, 0x7C=offset_lo, 0x7D=arm, 0x7E=dump
   process(clk_50mhz)
   begin
     if rising_edge(clk_50mhz) then
       capture_arm  <= '0';
       capture_dump <= '0';
       if uart_wr_en = '1' then
+        if uart_wr_addr = to_unsigned(123, 7) then  -- 0x7B
+          capture_offset_hi <= uart_wr_data;
+        end if;
+        if uart_wr_addr = to_unsigned(124, 7) then  -- 0x7C
+          capture_offset_lo <= uart_wr_data;
+        end if;
         if uart_wr_addr = to_unsigned(125, 7) then  -- 0x7D
           capture_arm <= '1';
         end if;
@@ -170,6 +178,7 @@ begin
               sample_tick => sample_tick, mix_in => mix_out,
               any_trig => any_trig,
               cmd_arm => capture_arm, cmd_dump => capture_dump,
+              offset_hi => capture_offset_hi, offset_lo => capture_offset_lo,
               tx_data => capture_tx_data, tx_start => capture_tx_start,
               tx_ready => capture_tx_ready, state_out => capture_state);
 

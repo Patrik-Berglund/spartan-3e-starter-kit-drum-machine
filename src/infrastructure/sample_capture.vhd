@@ -17,6 +17,10 @@ entity sample_capture is
     any_trig    : in  std_logic;
     cmd_arm     : in  std_logic;
     cmd_dump    : in  std_logic;
+    -- Offset: number of samples to skip after trigger before capturing
+    -- Set via register write before arming
+    offset_hi   : in  unsigned(7 downto 0);  -- offset(15:8)
+    offset_lo   : in  unsigned(7 downto 0);  -- offset(7:0)
     tx_data     : out std_logic_vector(7 downto 0);
     tx_start    : out std_logic;
     tx_ready    : in  std_logic;
@@ -37,13 +41,14 @@ architecture rtl of sample_capture is
   attribute ram_style of ram_lo : signal is "block";
 
   -- States: simple sequential dump with proper handshake
-  type state_t is (S_IDLE, S_ARMED, S_CAPTURING, S_FULL,
+  type state_t is (S_IDLE, S_ARMED, S_SKIPPING, S_CAPTURING, S_FULL,
                    S_DUMP_HI_LOAD, S_DUMP_HI_SEND, S_DUMP_HI_BUSY, S_DUMP_HI_WAIT,
                    S_DUMP_LO_LOAD, S_DUMP_LO_SEND, S_DUMP_LO_BUSY, S_DUMP_LO_WAIT);
   signal state : state_t := S_IDLE;
 
   signal wr_ptr : unsigned(13 downto 0) := (others => '0');
   signal rd_ptr : unsigned(13 downto 0) := (others => '0');
+  signal skip_cnt : unsigned(15 downto 0) := (others => '0');
 
   signal sample_s16 : signed(15 downto 0);
   signal tx_byte    : std_logic_vector(7 downto 0) := (others => '0');
@@ -82,7 +87,22 @@ begin
 
           when S_ARMED =>
             if any_trig = '1' then
-              state <= S_CAPTURING;
+              -- Load offset and start skipping (or go straight to capture if 0)
+              skip_cnt <= offset_hi & offset_lo;
+              if (offset_hi & offset_lo) = 0 then
+                state <= S_CAPTURING;
+              else
+                state <= S_SKIPPING;
+              end if;
+            end if;
+
+          when S_SKIPPING =>
+            if sample_tick = '1' then
+              if skip_cnt = 1 then
+                state <= S_CAPTURING;
+              else
+                skip_cnt <= skip_cnt - 1;
+              end if;
             end if;
 
           when S_CAPTURING =>

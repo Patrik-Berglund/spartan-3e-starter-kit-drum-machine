@@ -191,6 +191,8 @@ def main():
                         help='Skip triggering (capture whatever plays next)')
     parser.add_argument('--delay', type=float, default=0.3,
                         help='Delay after trigger before dump (seconds)')
+    parser.add_argument('--offset', type=int, default=0,
+                        help='Sample offset: skip N samples after trigger before capturing (0-65535)')
     parser.add_argument('--baud', type=int, default=115200, help='Baud rate')
     args = parser.parse_args()
 
@@ -208,8 +210,17 @@ def main():
 
     time.sleep(0.1)  # Let port settle
 
-    # Step 1: Arm capture
+    # Step 1: Set offset and arm capture
     print("Step 1: Arm capture")
+    if args.offset > 0:
+        offset_hi = (args.offset >> 8) & 0xFF
+        offset_lo = args.offset & 0xFF
+        ser.write(bytes([0x7B, offset_hi]))  # offset high byte
+        time.sleep(0.01)
+        ser.write(bytes([0x7C, offset_lo]))  # offset low byte
+        time.sleep(0.01)
+        skip_ms = args.offset / SAMPLE_RATE * 1000
+        print(f"  Set offset: {args.offset} samples ({skip_ms:.1f}ms)")
     arm_capture(ser)
     time.sleep(0.05)
 
@@ -221,8 +232,9 @@ def main():
         print("Step 2: Skipped (waiting for external trigger)")
 
     # Step 3: Wait for capture to complete
-    print(f"Step 3: Waiting {args.delay}s for capture to complete...")
-    time.sleep(args.delay)
+    total_wait = args.delay + args.offset / SAMPLE_RATE
+    print(f"Step 3: Waiting {total_wait:.1f}s for capture to complete...")
+    time.sleep(total_wait)
 
     # Step 4: Dump buffer
     print("Step 4: Dump buffer")
