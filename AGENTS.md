@@ -75,6 +75,8 @@ src/
   infrastructure/
     register_map.vhd       — 128x8-bit dual-port RAM (voice params, triggers, BPM)
     sine_table.vhd         — 256-entry 12-bit + linear interpolation (1 MULT18x18)
+    sample_capture.vhd     — 12288-sample capture buffer (12 BRAMs, see DAC Capture section)
+    uart_tx.vhd            — 115200 8N1 transmitter (for capture dump)
     debounce.vhd, rotary_decoder.vhd, spi_master.vhd, dac_driver.vhd, lcd_controller.vhd
   drums/                   — All 11 drum voice modules (parameterized)
   sequencer/               — Step sequencer + tempo clock
@@ -82,7 +84,7 @@ src/
   serial/
     uart_rx.vhd            — 115200 8N1 UART receiver, writes to register map
 constraints/
-  top.ucf                  — Pin assignments (includes serial_rx on R7)
+  top.ucf                  — Pin assignments (serial_rx on R7, serial_tx on M14)
 build/
   top.xst, top.prj         — Synthesis scripts
 scripts/
@@ -131,11 +133,18 @@ Voice indices: 0=BD, 1=SD, 2=LT, 3=MT, 4=HT, 5=RS, 6=CP, 7=CB, 8=CY, 9=OH, 10=CH
 
 | Resource | Used | Available | % |
 |----------|------|-----------|---|
-| Slices | 2,601 | 4,656 | 55% |
-| MULT18x18 | 16 | 20 | 80% |
-| BRAM | 1 | 20 | 5% |
-| Flip-flops | 1,871 | 9,312 | 20% |
-| LUTs | 4,857 | 9,312 | 52% |
+| Slices | 3,328 | 4,656 | 71% |
+| MULT18x18 | 19 | 20 | 95% |
+| BRAM | 14 | 20 | 70% |
+| Flip-flops | 2,188 | 9,312 | 23% |
+| LUTs | 6,259 | 9,312 | 67% |
+
+**MULT18x18 is nearly exhausted (95%).** Adding any new multiply (e.g. a
+gain compensation stage) will likely need to be converted to shift-and-add
+instead of a `*` operator — see Design Gotchas below. Above ~19/20, XST's
+placer can hit a fatal internal error (`Pl_Uap_Flow1FitterRuleFastFeedbacks:
+bad index to sec_nodes array`) on certain netlist patterns; freeing a
+multiplier resolved it once already (see CH/OH/CY filter rework).
 
 ## UI
 
@@ -259,6 +268,22 @@ No `sudo` needed for fxload or xc3sprog on this setup.
 4. **No conditional expressions in port maps** — use intermediate signals
 5. **No hex literals in aggregates** — `(others => x"20")` is invalid
 6. **`mkdir -p build/xst/tmp` required** — Makefile handles this
+7. **Signal (`<=`) vs variable (`:=`) timing in cascaded filter stages** —
+   a signal assigned with `<=` does NOT update until after the clock edge;
+   reading that signal later in the SAME process invocation gives the OLD
+   value. In a multi-stage IIR filter cascade (`acc <= acc + delta; x :=
+   input - acc`), this silently breaks the filter — `x` gets the pre-update
+   accumulator instead of the intended post-update value. Fix: compute the
+   new value into a variable first (`new_acc := acc + delta; x := input -
+   new_acc; acc <= new_acc;`). Caused a severe bug in the CH/OH/CY hihat
+   filters (hardware output clipped/garbage, -0.13 correlation to sim)
+   that passed synthesis and P&R with zero errors/warnings — this class of
+   bug is invisible to the toolchain and only shows up as wrong audio.
+8. **Constant multiplies eat MULT18X18 blocks** — `signal * to_signed(70,
+   8)` infers a dedicated multiplier even for compile-time constants.
+   When near the 20-multiplier budget, convert to shift-and-add (`70 =
+   64+4+2` → three `shift_left` + `+`) to avoid tipping into placer
+   failures (see Design Gotchas #6).
 
 ## Design Gotchas
 
@@ -267,3 +292,9 @@ No `sudo` needed for fxload or xc3sprog on this setup.
 3. **LCD init is timing-critical** — HD44780 power-on sequence must be exact
 4. **SPI bus is shared** — only DAC uses it in this project, but disable other devices (sf_ce0='1', fpga_init_b='1')
 5. **Programmer needs firmware** — fxload MUST be run before xc3sprog (see Program section)
+6. **MULT18x18 near-exhaustion causes fatal placer errors** — above ~19/20
+   multipliers used, XST's placer can hit `Pl_Uap_Flow1FitterRuleFastFeedbacks:
+   bad index to sec_nodes array` on certain netlist patterns, even though
+   synthesis reports 0 errors. The fix is to free a multiplier (e.g.
+   convert a constant multiply to shift-and-add), not to debug the netlist
+   pattern itself — the error is in the ISE 14.7 placer, not the design.
