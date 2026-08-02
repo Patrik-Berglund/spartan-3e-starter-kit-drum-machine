@@ -93,7 +93,7 @@ scripts/
 
 ## Register Map
 
-All voice parameters accessible via UART serial (115200 8N1, pin R7).
+All voice parameters accessible via UART serial (115200 8N1, RX=pin R7, TX=pin M14).
 Protocol: 2 bytes — [address] [data].
 
 | Address | Voice | Parameter | Range |
@@ -112,6 +112,10 @@ Protocol: 2 bytes — [address] [data].
 | 0x39 | OH | Decay | 0-255 |
 | 0x40 | — | BPM | 40-240 |
 | 0x41 | — | Play/Stop toggle | write 1 |
+| 0x7B | — | Capture offset high byte | 0-255 |
+| 0x7C | — | Capture offset low byte | 0-255 |
+| 0x7D | — | Arm capture (write 1) | pulse |
+| 0x7E | — | Dump capture buffer (write 1) | pulse |
 
 Voice indices: 0=BD, 1=SD, 2=LT, 3=MT, 4=HT, 5=RS, 6=CP, 7=CB, 8=CY, 9=OH, 10=CH
 
@@ -158,6 +162,47 @@ ser.write(bytes([0x20, 200]))  # BD TONE = 200
 ser.write(bytes([0x30, 100]))  # BD DECAY = 100
 ser.write(bytes([0x00, 1]))    # Trigger BD
 ```
+
+## DAC Sample Capture (Hardware Debugging)
+
+Captures the mixer output (12-bit DAC samples) into a 12288-sample BRAM buffer
+(~252ms at 48828Hz), then dumps over UART TX for comparison with the sim.
+
+### Usage
+
+```bash
+# Basic capture (first 252ms after trigger)
+python3 scripts/capture_dump.py --voice bd --output scripts/output_capture/bd.wav
+
+# With offset (capture 252-504ms after trigger)
+python3 scripts/capture_dump.py --voice bd --offset 12288 --output scripts/output_capture/bd_chunk2.wav
+
+# Compare with sim output
+python3 scripts/capture_dump.py --voice bd --compare scripts/output_vhdl/01_kick.wav
+```
+
+### Protocol
+
+1. Set offset (optional): `[0x7B, hi_byte]` then `[0x7C, lo_byte]` (16-bit sample count to skip)
+2. Arm capture: `[0x7D, 0x01]` — buffer waits for any voice trigger
+3. Trigger a voice: `[0x00, 0x01]` — starts capture after offset samples
+4. Wait for buffer to fill: offset/48828 + 0.252 seconds
+5. Request dump: `[0x7E, 0x01]` — FPGA sends 24576 bytes (12288 × 16-bit, MSB first)
+6. At 115200 baud, dump takes ~2.1 seconds
+
+### Stitching for longer captures
+
+For recordings longer than 252ms, capture multiple chunks with increasing offsets:
+- Chunk 1: offset=0 (0-252ms)
+- Chunk 2: offset=12288 (252-504ms)
+- Chunk 3: offset=24576 (504-756ms)
+
+Each chunk requires a separate trigger, so the sound must be deterministic.
+
+### Storage format
+
+Samples are signed 16-bit: `(mix_out - 2048) << 4` where mix_out is the 12-bit unsigned DAC value.
+Transmitted MSB first per sample. Sample rate is 48828Hz (50MHz / 1024).
 
 ## Development Workflow (IMPORTANT)
 
